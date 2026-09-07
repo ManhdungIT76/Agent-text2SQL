@@ -12,6 +12,9 @@ __pycache__/
 # Environment variables
 .env
 
+# Cache files
+app/metadata/schema_cache.json
+
 # IDEs and OS files
 .vscode/
 .idea/

@@ -4,33 +4,58 @@ import sys
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
-from app.database.connection import get_db_connection
-from app.database.executor import execute_sql
-from app.llm.client import generate_sql
+from app.metadata.openmetadata_client import om_client
+from app.agent.graph import text2sql_agent_graph, get_langfuse_handler
 
-def run_query(db, question: str):
-    print("=" * 70)
-    print(f"Câu hỏi: {question}")
+def run_query(question: str):
+    print("=" * 80)
+    print(f"❓ [USER INPUT]: \"{question}\"")
+    print("=" * 80)
     
-    # 1. Gửi câu hỏi lên AI Cloud (LangChain + Gemini)
-    sql_query = generate_sql(question)
-    print(f"\n[SQL được AI tạo ra]:\n{sql_query}\n")
-    
-    # 2. Thực thi câu lệnh SQL vào Docker Postgres (dvdrental)
-    results = execute_sql(db, sql_query)
-    print(f"[Kết quả từ Docker Postgres]:\n{results}")
-    print("=" * 70 + "\n")
+    # Kích hoạt LangGraph Workflow (Graph-RAG -> Prompt v2.0 -> Postgres Execution -> Self-Correction)
+    initial_state = {
+        "question": question,
+        "schema_context": "",
+        "sql": "",
+        "query_result": None,
+        "error_message": None,
+        "retry_count": 0,
+        "max_retries": 3
+    }
+
+    # Truyền Langfuse Handler vào config nếu đã cấu hình Key
+    run_config = {}
+    langfuse_handler = get_langfuse_handler()
+    if langfuse_handler:
+        run_config["callbacks"] = [langfuse_handler]
+        print("📊 [LANGFUSE TRACING]: Kích hoạt Callback Tracing cho lượt chạy này.")
+
+    final_state = text2sql_agent_graph.invoke(initial_state, config=run_config)
+
+    print(f"\n✨ [CÂU LỆNH SQL CUỐI CÙNG]:\n>>> {final_state.get('sql')}\n")
+
+    results = final_state.get("query_result")
+    if results is not None:
+        print(f"📊 [KẾT QUẢ TRẢ VỀ BẢNG DỮ LIỆU]:\n{results}")
+    else:
+        print(f"⚠️ [CẢNH BÁO THỰC THI]: Không thể lấy dữ liệu ({final_state.get('error_message')})")
+
+    print("=" * 80 + "\n")
 
 def main():
-    db = get_db_connection()
+    print("\n🚀 [ENTERPRISE LANGGRAPH TEXT2SQL AGENT]: GRAPH-RAG + SELF-CORRECTION LOOP\n")
+    
+    # 1. Đảm bảo Local Disk Cache đã được tạo/đồng bộ
+    om_client.load_local_cache()
+    
+    # 2. Danh sách câu hỏi thử nghiệm (Tối đa 2 câu để tiết kiệm quota & tăng tốc độ test)
     questions = [
-        "Cho tôi danh sách các khách hàng có tài khoản đang bị khóa?",
-        "Liệt kê 5 bộ phim có giá thuê đĩa rẻ nhất?",
-        "Hệ thống đã thu về tổng cộng bao nhiêu doanh thu tiền mặt?"
+        "Cho tôi xem báo cáo tổng doanh thu bán đĩa phân theo từng thể loại phim?",
+        "Cho tôi danh sách các khách hàng có tài khoản đang bị khóa?"
     ]
     
     for q in questions:
-        run_query(db, q)
+        run_query(q)
 
 if __name__ == "__main__":
     main()
