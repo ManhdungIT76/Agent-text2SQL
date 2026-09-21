@@ -19,10 +19,8 @@ chroma_db/
 
 # Reports and Documentation files
 *.docx
-ARCHITECTURE_WORKFLOW.md
-WORKFLOW_*.md
-PROGRESS.md
-NEXT_STEPS_TODO.md
+*.md
+
 
 # IDEs and OS files
 .vscode/
