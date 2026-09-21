@@ -1,0 +1,87 @@
+services:
+  # 1. POSTGRESQL DATABASE (Dữ liệu bán lẻ & OpenMetadata DB)
+  postgres-db:
+    image: postgres:15-alpine
+    container_name: text2sql-postgres
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password123
+      POSTGRES_DB: dvdrental
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./init-db:/docker-entrypoint-initdb.d # Tự động nạp dữ liệu bán lẻ & openmetadata_db
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - text2sql-network
+
+  # 2. OPENSEARCH (Bộ tìm kiếm & đánh chỉ mục cho OpenMetadata)
+  opensearch:
+    image: opensearchproject/opensearch:2.7.0
+    container_name: text2sql-opensearch
+    environment:
+      - cluster.name=opensearch-cluster
+      - node.name=opensearch
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - DISABLE_SECURITY_PLUGIN=true
+    ports:
+      - "9200:9200"
+    networks:
+      - text2sql-network
+
+  # 3. OPENMETADATA SERVER (Hệ thống quản lý dữ liệu tập trung)
+  openmetadata:
+    image: openmetadata/server:latest
+    container_name: text2sql-openmetadata
+    ports:
+      - "8585:8585" # Cổng giao diện Web UI
+    environment:
+      OM_HOST: http://localhost:8585
+      DB_SCHEME: postgresql
+      DB_DRIVER_CLASS: org.postgresql.Driver
+      DB_HOST: postgres-db
+      DB_PORT: 5432
+      DB_USER: admin
+      DB_USER_PASSWORD: password123
+      DB_NAME: openmetadata_db
+      SEARCH_TYPE: opensearch
+      ELASTICSEARCH_HOST: opensearch
+      ELASTICSEARCH_PORT: 9200
+      PIPELINE_SERVICE_CLIENT_ENABLED: "true"
+      PIPELINE_SERVICE_CLIENT_CLASS_NAME: org.openmetadata.service.clients.pipeline.airflow.AirflowRESTClient
+      PIPELINE_SERVICE_CLIENT_ENDPOINT: http://ingestion:8080
+      SERVER_HOST_API_URL: http://openmetadata:8585/api
+    volumes:
+      - openmetadata_sample_data:/openmetadata/data
+    networks:
+      - text2sql-network
+    depends_on:
+      - postgres-db
+      - opensearch
+
+  # 4. OPENMETADATA INGESTION ENGINE (Tự động quét metadata, nối bảng & tự cập nhật)
+  ingestion:
+    image: openmetadata/ingestion:latest
+    container_name: text2sql-ingestion
+    command: ["standalone"]
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__WEBSERVER__BASE_URL: http://localhost:8080
+      OPENMETADATA_SERVER_URL: http://openmetadata:8585/api
+    ports:
+      - "8080:8080"
+    networks:
+      - text2sql-network
+    depends_on:
+      - openmetadata
+
+networks:
+  text2sql-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  openmetadata_sample_data:

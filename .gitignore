@@ -1,0 +1,32 @@
+# Python virtual environments
+.agent/
+venv/
+.venv/
+env/
+
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables
+.env
+
+# Cache files
+app/metadata/schema_cache.json
+chroma_db/
+
+
+# Reports and Documentation files
+*.docx
+ARCHITECTURE_WORKFLOW.md
+WORKFLOW_*.md
+PROGRESS.md
+NEXT_STEPS_TODO.md
+
+# IDEs and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
