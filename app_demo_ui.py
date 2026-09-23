@@ -1,8 +1,11 @@
 import sys
+import warnings
 import pandas as pd
 import streamlit as st
 import networkx as nx
 import psycopg2
+
+warnings.filterwarnings("ignore", message=".*use_container_width.*")
 
 from app.agent.graph import text2sql_agent_graph, get_langfuse_handler
 from app.metadata.openmetadata_client import om_client
@@ -196,7 +199,13 @@ with st.sidebar:
         else:
             st.warning("🔴 Langfuse: Chưa cấu hình API Key")
     
-    if st.button("🗑️ Xóa Lịch Sử Chat", use_container_width=True):
+    if st.button("🔄 Đồng Bộ Metadata Mới", width="stretch"):
+        with st.spinner("Đang làm mới RAM Cache từ OpenMetadata Server..."):
+            om_client.reload_cache()
+        st.success("✅ Đã làm mới Metadata trên RAM!")
+        st.rerun()
+
+    if st.button("🗑️ Xóa Lịch Sử Chat", width="stretch"):
         st.session_state.messages = []
         st.rerun()
 
@@ -222,7 +231,7 @@ if "messages" not in st.session_state:
 # =====================================================================
 for idx, msg in enumerate(st.session_state.messages):
     with st.chat_message("user"):
-        st.markdown(f"**{msg['question']}**")
+        st.markdown(msg['question']) 
 
     with st.chat_message("assistant"):
         st.markdown(f"### 📌 1. Các Bảng Thực Thể Được Chọn (Prompt 1 Output)")
@@ -251,7 +260,7 @@ for idx, msg in enumerate(st.session_state.messages):
 
         st.markdown("### 📊 Kết Quả Truy Vấn CSDL PostgreSQL")
         if msg.get("df") is not None and not msg["df"].empty:
-            st.dataframe(msg["df"], use_container_width=True)
+            st.dataframe(msg["df"], width="stretch")
         elif msg.get("error_msg"):
             st.caption(msg["error_msg"])
         else:
@@ -266,8 +275,18 @@ if user_question:
     query_count = len(st.session_state.messages) + 1
 
     with st.spinner("⚡ [LangGraph State Machine Agent]: Đang thực thi qua 6 Nút (Graph-RAG -> Generator -> Safety Assessor -> PostgreSQL -> Self-Correction)..."):
+        # Lọc sạch lịch sử chat: chỉ lấy question và sql_code (loại bỏ đối tượng DataFrame gây lỗi msgpack)
+        clean_history = [
+            {
+                "role": "user", "question": m.get("question", ""),
+                "role_assistant": "assistant", "sql": m.get("sql_code", "")
+            }
+            for m in st.session_state.messages
+        ]
+
         initial_state = {
             "question": user_question,
+            "chat_history": clean_history,
             "schema_context": "",
             "sql": "",
             "query_result": None,

@@ -153,15 +153,24 @@ def _get_prompt_content(prompt_name: str, fallback_template: str, variables: dic
                             compiled = compiled.replace(placeholder, str(var_value))
 
                     try:
-                        print(f"🔗 [LANGFUSE PROMPT GOVERNANCE]: Đã nạp thành công '{prompt_name}' từ Langfuse Server!")
+                        print(f"[PROMPT] Loaded '{prompt_name}' from Langfuse Cloud.")
                     except Exception:
-                        print(f"[LANGFUSE PROMPT GOVERNANCE]: Da nap thanh cong '{prompt_name}' tu Langfuse Server!")
+                        print(f"[PROMPT] Loaded '{prompt_name}' from Langfuse Cloud.")
                     return compiled
         except Exception as e:
             try:
-                print(f"⚠️ [LANGFUSE PROMPT WARN]: Không nạp được '{prompt_name}' từ Langfuse Cloud ({e}) → Dùng Local Fallback.")
+                print(f"[PROMPT WARN] Could not fetch '{prompt_name}' from Langfuse -> Using local prompt.")
             except Exception:
-                print(f"[LANGFUSE PROMPT WARN]: Khong nap duoc '{prompt_name}' ({e}) -> Dung Local Fallback.")
+                print(f"[PROMPT WARN] Could not fetch '{prompt_name}' from Langfuse -> Using local prompt.")
+
+    # Fallback đĩa cục bộ: Thay thế biến vào fallback_template nếu không gọi được Langfuse
+    res = fallback_template
+    for var_name, var_value in variables.items():
+        placeholder = "{" + var_name + "}"
+        if placeholder in res and var_value is not None:
+            res = res.replace(placeholder, str(var_value))
+    return res
+
 
 
 def get_display_prompt_text(prompt_name: str, fallback_template: str) -> str:
@@ -241,4 +250,45 @@ def build_correction_prompt(question: str, failed_sql: str, error_msg: str, sche
         ("system", safe_text),
         ("human", "Hãy phân tích lỗi và trả về câu lệnh SQL đã sửa hoàn chỉnh.")
     ])
+
+
+CONTEXTUALIZE_PROMPT_TEMPLATE = """### QUERY REWRITER & INTENT DETECTOR
+Bạn là Chuyên gia Phân tích Ngữ cảnh Hội thoại CSDL. Nhiệm vụ: Kiểm tra xem [CÂU HỎI MỚI] có phụ thuộc vào [LỊCH SỬ HỘI THOẠI] hay không để viết lại thành một câu hỏi độc lập.
+
+[LỊCH SỬ HỘI THOẠI TRƯỚC ĐÓ]:
+{chat_history}
+
+[CÂU HỎI MỚI]:
+{question}
+
+[QUY TẮC XỬ LÝ]:
+1. NẾU LÀ CÂU HỎI MỚI ĐỘC LẬP (Có chủ ngữ cụ thể, đổi chủ đề mới, KHÔNG chứa từ chỉ định tham chiếu):
+   -> GIỮ NGUYÊN câu hỏi mới. TUYỆT ĐỐI KHÔNG ghép thông tin lịch sử cũ vào.
+
+2. NẾU LÀ CÂU HỎI NỐI TIẾP (Chứa từ chỉ định "đó", "này", "vừa rồi", "trên", "trong số đó" hoặc khuyết đối tượng):
+   -> KẾT HỢP ngữ cảnh câu trước. Nếu câu trước có danh sách kết quả cụ thể (danh sách thể loại, ID, tên...), hãy BƠM TRỰC TIẾP danh sách đó vào thay thế cho từ chỉ định ("đó", "này").
+
+[VÍ DỤ]:
+- Lịch sử: "Top 5 thể loại ít được xem nhất" -> Kết quả: ['Music', 'Travel', 'Horror', 'Comedy', 'Classics']
+- Câu mới: "Cho 2 bộ phim của mỗi thể loại đó"
+- ĐẦU RA: "Cho 2 bộ phim của mỗi thể loại trong danh sách: Music, Travel, Horror, Comedy, Classics"
+
+[YÊU CẦU ĐẦU RA]:
+- Không sinh mã SQL. CHỈ TRẢ VỀ DUY NHẤT CÂU HỎI ĐÃ ĐƯỢC XỬ LÝ.
+"""
+
+
+def get_contextualize_prompt(chat_history: str, question: str = "") -> ChatPromptTemplate:
+    """PROMPT REWRITER: Nạp 'text2sql-contextualizer' từ Langfuse Cloud (với fallback local)"""
+    system_text = _get_prompt_content(
+        prompt_name="text2sql-contextualizer",
+        fallback_template=CONTEXTUALIZE_PROMPT_TEMPLATE,
+        variables={"chat_history": chat_history, "question": question}
+    )
+    safe_text = system_text.replace("{", "{{").replace("}", "}}")
+    return ChatPromptTemplate.from_messages([
+        ("system", safe_text),
+        ("human", "{question}")
+    ])
+
 

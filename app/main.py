@@ -23,8 +23,8 @@ def run_query(question: str):
         "max_retries": 3
     }
 
-    # Truyền Langfuse Handler vào config nếu đã cấu hình Key
-    run_config = {}
+    # Truyền Langfuse Handler và configurable thread_id
+    run_config = {"configurable": {"thread_id": "main-test-session"}}
     langfuse_handler = get_langfuse_handler()
     if langfuse_handler:
         run_config["callbacks"] = [langfuse_handler]

@@ -81,9 +81,9 @@ class SmartSchemaRetriever:
                         metadatas=metadatas,
                         ids=ids
                     )
-                print("✨ [GRAPH-RAG ENGINE]: Đã khởi tạo thành công Vector DB (ChromaDB) & Graph DB (NetworkX)!")
+                print("[GRAPH-RAG] Initialized Vector DB (ChromaDB) & Graph DB (NetworkX).")
             except Exception as e:
-                print(f"[CẢNH BÁO VECTOR DB]: Lỗi khởi tạo ChromaDB ({e}), fallback sang Keyword/Graph Search.")
+                print(f"[GRAPH-RAG WARN] Failed to initialize ChromaDB ({e}) -> Fallback to Keyword/Graph Search.")
 
         self.initialized = True
 
@@ -100,7 +100,7 @@ class SmartSchemaRetriever:
                     if seeds:
                         return seeds
             except Exception as e:
-                print(f"[CẢNH BÁO VECTOR QUERY]: ({e})")
+                print(f"[GRAPH-RAG WARN] Vector query error: {e}")
 
         # Fallback keyword matching nếu Vector DB chưa sẵn sàng
         tables = self.cache_data.get("tables", {})
@@ -195,34 +195,10 @@ class SmartSchemaRetriever:
             clean_seeds = ["film"]
 
         all_relevant_names = self._expand_tables_via_graph(clean_seeds, max_tables=max_tables)
-        relevant_tables = [tables[name] for name in all_relevant_names if name in tables]
+        # Sử dụng OpenMetadata Client để chỉ nạp thông tin chi tiết các cột của đúng danh sách bảng đã lọc
+        schema_context = om_client.get_selective_schema_context(all_relevant_names)
 
-        schema_lines = []
-        for tbl in relevant_tables:
-            t_name = tbl.get("name", "")
-            t_desc = tbl.get("description", "")
-
-            cols_desc = []
-            for col in tbl.get("columns", []):
-                c_name = col.get("name", "")
-                c_type = col.get("type", "")
-                c_desc = col.get("description", "")
-                desc_part = f" - {c_desc}" if c_desc else ""
-                cols_desc.append(f"{c_name} ({c_type}){desc_part}")
-
-            fks_lines = []
-            for fk in tbl.get("foreign_keys", []):
-                fk_col = ", ".join(fk.get("columns", []))
-                t_tbl = fk.get("target_table", "")
-                t_col = fk.get("target_column", "")
-                fks_lines.append(f"FK({fk_col})->{t_tbl}({t_col})")
-
-            cols_str = "\n    - ".join(cols_desc)
-            fks_str = ("\n  Khóa Ngoại FKs: " + ", ".join(fks_lines)) if fks_lines else ""
-            desc_str = f" ({t_desc})" if t_desc else ""
-            schema_lines.append(f"• BẢNG `{t_name}`{desc_str}:\n  Các cột:\n    - {cols_str}{fks_str}")
-
-        return "\n\n".join(schema_lines), clean_seeds, all_relevant_names
+        return schema_context, clean_seeds, all_relevant_names
 
     def get_schema_context_from_seed_tables(self, seed_tables: List[str], max_tables: int = 7) -> str:
         context, _, _ = self.get_schema_context_from_seed_tables_detailed(seed_tables, max_tables=max_tables)

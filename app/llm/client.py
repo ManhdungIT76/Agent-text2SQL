@@ -93,7 +93,7 @@ def select_tables(question: str, schema_overview: str) -> list:
             if isinstance(tables_list, list):
                 return _validate_and_normalize_selected_tables(tables_list, question=question)
     except Exception as e:
-        print(f"⚠️ [SELECT TABLES PRIMARY LLM ERROR]: {e} → Đang chuyển sang Fallback LLM...")
+        print(f"[LLM WARN] Table selection primary model error ({e}) -> Switching to failover model...")
 
     # Thử với Fallback LLM nếu Primary bị Rate Limit (429)
     try:
@@ -110,10 +110,10 @@ def select_tables(question: str, schema_overview: str) -> list:
                 raw_content = json_match.group(0)
             tables_list = json.loads(raw_content)
             if isinstance(tables_list, list):
-                print("✅ [SELECT TABLES FAILOVER]: Thành công!")
+                print("[LLM INFO] Table selection failover model execution successful.")
                 return _validate_and_normalize_selected_tables(tables_list, question=question)
     except Exception as fe:
-        print(f"⚠️ [SELECT TABLES FAILOVER ERROR]: {fe} → Using rule-based fallback...")
+        print(f"[LLM WARN] Table selection failover error ({fe}) -> Using rule-based fallback.")
 
     
     # Fallback tự động động 100%: Phân tích keyword từ schema_overview thay vì hardcode tên bảng
@@ -148,7 +148,7 @@ def get_llm_model():
             )
             return ChatHuggingFace(llm=endpoint)
         except Exception as e:
-            print(f"⚠️ [HUGGINGFACE LOAD ERROR]: {e} → Fallback sang Groq/Gemini...")
+            print(f"[LLM WARN] HuggingFace load error ({e}) -> Fallback to Groq/Gemini.")
             return get_fallback_llm()
     elif config.LLM_PROVIDER == "groq" and config.GROQ_API_KEY:
         from langchain_groq import ChatGroq
@@ -237,9 +237,9 @@ def generate_sql(question: str, schema_context: str = None) -> str:
     except Exception as e:
         err_str = str(e)
         if _is_rate_limit_error(err_str):
-            print(f"⚠️ [LLM RATE LIMIT]: {err_str[:80]}... → Đang thử lại với Fallback...")
+            print(f"[LLM WARN] Primary model rate limited (429) -> Switching to failover...")
         else:
-            print(f"⚠️ [LLM ERROR]: {err_str[:120]}... → Thử chuyển sang Fallback...")
+            print(f"[LLM WARN] Primary model error -> Switching to failover...")
             
         try:
             fallback_llm = get_fallback_llm()
@@ -247,10 +247,10 @@ def generate_sql(question: str, schema_context: str = None) -> str:
                 chain = prompt | fallback_llm
                 response = chain.invoke({"question": question}, config=cfg)
                 _flush_langfuse(lf_handler)
-                print("✅ [LLM FAILOVER]: Thành công!")
+                print("[LLM INFO] Failover model execution successful.")
                 return clean_sql(response.content)
         except Exception as fe:
-            print(f"⚠️ [LLM FAILOVER FAILED]: {fe}")
+            print(f"[LLM ERROR] Failover model failed: {fe}")
             
     raise RuntimeError("Không thể kết nối đến LLM Service (Groq/Gemini). Vui lòng kiểm tra lại API Key hoặc hạn mức Quota trong file .env.")
 
@@ -276,17 +276,55 @@ def correct_sql(question: str, failed_sql: str, error_msg: str, schema_context: 
             return clean_sql(response.content)
     except Exception as e:
         err_str = str(e)
-        print(f"⚠️ [SELF-CORRECT LLM PRIMARY ERROR]: {err_str[:100]} → Đang chuyển sang Gemini Failover...")
+        print(f"[LLM WARN] Self-correction primary model error -> Switching to failover...")
         try:
             fallback_llm = get_fallback_llm()
             if fallback_llm:
                 chain = prompt | fallback_llm
                 response = chain.invoke({}, config=cfg)
                 _flush_langfuse(lf_handler)
-                print("✅ [SELF-CORRECT GEMINI FAILOVER]: Thành công!")
+                print("[LLM INFO] Self-correction failover model execution successful.")
                 return clean_sql(response.content)
         except Exception as fe:
-            print(f"⚠️ [SELF-CORRECT GEMINI FAILOVER FAILED]: {fe}")
+            print(f"[LLM ERROR] Self-correction failover model failed: {fe}")
     
     # Ẩn Hardcoded Fallback: Trả về câu lệnh hỏng ban đầu để hiển thị chính xác lỗi
     return failed_sql
+
+
+def contextualize_question(question: str, chat_history: list = None) -> str:
+    """Viết lại câu hỏi nối tiếp dựa trên lịch sử hội thoại thành câu hỏi tự thân (Standalone Question)"""
+    if not chat_history:
+        return question
+
+    # Định dạng lịch sử tin nhắn ngắn gọn (lấy tối đa 5 lượt gần nhất)
+    formatted_history = ""
+    for msg in chat_history[-5:]:
+        role = "User" if msg.get("role") == "user" else "Assistant"
+        content = msg.get("content") or msg.get("question") or msg.get("sql", "")
+        if content:
+            formatted_history += f"- {role}: {content}\n"
+
+    if not formatted_history.strip():
+        return question
+
+    from app.llm.prompts import get_contextualize_prompt
+    prompt = get_contextualize_prompt(chat_history=formatted_history, question=question)
+    cfg, lf_handler = _get_langfuse_config()
+
+    try:
+        llm = get_llm_model() or get_fallback_llm()
+        if llm:
+            chain = prompt | llm
+            response = chain.invoke({"question": question}, config=cfg)
+            _flush_langfuse(lf_handler)
+            content = getattr(response, "content", str(response)).strip()
+            # Làm sạch nếu AI lỡ bọc trong thẻ/quote
+            content = re.sub(r'^["\']|["\']$', '', content).strip()
+            if content and content != question:
+                print(f"[STEP 1: QUERY REWRITER] Rewrote query -> '{content}'")
+                return content
+    except Exception as e:
+        print(f"[STEP 1: QUERY REWRITER WARN] {e} -> Keeping original question.")
+
+    return question

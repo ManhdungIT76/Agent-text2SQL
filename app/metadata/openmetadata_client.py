@@ -69,11 +69,13 @@ def extract_dynamic_foreign_keys_from_db() -> Dict[str, list]:
 
 
 class OpenMetadataClient:
-    """Client kết nối OpenMetadata REST API & Quản lý Local Disk Cache (Tự động Sync hàng ngày)"""
+    """Client kết nối OpenMetadata REST API & Quản lý Hybrid Memory/Disk Cache (TTL 24h)"""
     
     def __init__(self, api_url: Optional[str] = None):
         self.api_url = api_url or os.getenv("OPENMETADATA_API", "http://localhost:8585/api/v1")
         self.token: Optional[str] = None
+        self._memory_cache: Optional[Dict[str, Any]] = None
+        self._last_sync_time: float = 0
 
     def check_connection(self) -> bool:
         """Kiểm tra xem OpenMetadata REST API Server có đang Online không"""
@@ -105,13 +107,12 @@ class OpenMetadataClient:
         Đồng bộ Metadata từ OpenMetadata API và lưu trữ cấu trúc dạng JSON vào file schema_cache.json
         """
         from app.config import config
-        print("🔄 [OPENMETADATA AUTO-SYNC]: Đang tự động cập nhật Metadata từ OpenMetadata...")
+        print("[METADATA] Syncing schema from OpenMetadata API...")
         token = self.get_token()
         headers = {"Authorization": f"Bearer {token}"}
         db_schema_fqn = f"{config.OM_SERVICE_NAME}.{config.OM_DATABASE}.{config.OM_SCHEMA}"
         url = f"{self.api_url}/tables?databaseSchema={db_schema_fqn}&fields=columns,tableConstraints&limit=100"
 
-        
         resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code != 200:
             raise Exception(f"Lỗi lấy Metadata từ OpenMetadata: Status {resp.status_code} - {resp.text}")
@@ -168,31 +169,49 @@ class OpenMetadataClient:
         with open(CACHE_FILE_PATH, "w", encoding="utf-8") as f:
             json.dump(cache_data, f, ensure_ascii=False, indent=2)
             
-        print(f"💾 [CACHE AUTO-UPDATED]: Đã lưu bộ nhớ đệm {len(tables_data)} bảng vào {CACHE_FILE_PATH}")
+        print(f"[METADATA] Loaded {len(tables_data)} tables into RAM Cache (Sync OK).")
+        self._memory_cache = cache_data
+        self._last_sync_time = time.time()
         return cache_data
 
-    def load_local_cache(self) -> Dict[str, Any]:
+    def load_local_cache(self, force_refresh: bool = False) -> Dict[str, Any]:
         """
-        Ưu tiên hàng đầu: Luôn thử gọi trực tiếp OpenMetadata REST API Live để đồng bộ mô tả mới nhất.
-        Nếu OpenMetadata Server bị tắt hoặc mất mạng -> Tự động Fallback đọc file đĩa cục bộ (schema_cache.json).
+        CƠ CHẾ HYBRID CACHE VỚI RAM TTL 24H:
+        1. Ưu tiên hàng đầu: Trả về trực tiếp dữ liệu trên RAM (0ms latency, không gọi mạng/đĩa).
+        2. Sau 24h hoặc khi force_refresh=True: Thử gọi OpenMetadata Live REST API để làm mới.
+        3. Nếu OpenMetadata Server offline: Fallback đọc file schema_cache.json từ đĩa.
         """
-        # Bước 1: Ưu tiên thử gọi trực tiếp OpenMetadata Server Live
+        now = time.time()
+
+        # Bước 1: Trả về ngay từ RAM nếu dữ liệu chưa hết hạn 24h và không bị ép làm mới
+        if not force_refresh and self._memory_cache and (now - self._last_sync_time < CACHE_TTL_SECONDS):
+            return self._memory_cache
+
+        # Bước 2: Thử gọi trực tiếp OpenMetadata Server Live nếu đã hết hạn 24h hoặc force_refresh=True
         try:
             return self.sync_cache_from_openmetadata()
         except Exception as sync_err:
-            print(f"⚠️ [OPENMETADATA OFFLINE / TIMEOUT]: Không kết nối được OpenMetadata Server ({sync_err}). Chuyển sang Fallback đọc Local Disk Cache...")
+            print(f"[METADATA WARN] OpenMetadata API offline ({sync_err}) -> Using local disk cache.")
 
-        # Bước 2: Fallback đọc từ file schema_cache.json nếu OpenMetadata Server bị lỗi
+        # Bước 3: Fallback đọc từ file schema_cache.json trên đĩa
         if os.path.exists(CACHE_FILE_PATH):
             try:
                 with open(CACHE_FILE_PATH, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    print(f"💾 [DISK CACHE FALLBACK]: Đã nạp thành công Metadata từ file đĩa cục bộ {CACHE_FILE_PATH}")
+                    self._memory_cache = data
+                    self._last_sync_time = data.get("last_synced_timestamp", now)
+                    print(f"[METADATA] Loaded {len(data.get('tables', {}))} tables from local disk cache into RAM.")
                     return data
             except Exception as read_err:
-                print(f"❌ [LỖI ĐỌC DISK CACHE]: ({read_err})")
+                print(f"[METADATA ERROR] Failed to read disk cache: {read_err}")
 
         return {"tables": {}}
+
+    def reload_cache(self) -> Dict[str, Any]:
+        """Ép buộc xóa bộ nhớ RAM và làm mới Metadata từ OpenMetadata API"""
+        return self.load_local_cache(force_refresh=True)
+
+
 
 
     def fetch_schema_context(self) -> str:
@@ -212,7 +231,8 @@ class OpenMetadataClient:
 
     def get_schema_overview(self) -> str:
         """
-        Trả về chuỗi tổng quan (Overview) tên bảng và mô tả nghiệp vụ cho LLM ở Giai đoạn 2 (Prompt 1).
+        Trả về chuỗi tổng quan (Overview) tên bảng và mô tả nghiệp vụ cho Node 1A (Prompt 1: text2sql-table-selector).
+        CHỈ bao gồm tên bảng và mô tả tổng quan, KHÔNG chứa thông tin chi tiết cột.
         """
         data = self.load_local_cache()
         tables = data.get("tables", {})
@@ -222,5 +242,44 @@ class OpenMetadataClient:
             overview_lines.append(f"• BẢNG `{t_name}`: {t_desc}")
         return "\n".join(overview_lines)
 
-# Instance singleton
+    def get_selective_schema_context(self, table_names: list) -> str:
+        """
+        Trả về chuỗi Schema Context chi tiết (Tên cột, kiểu dữ liệu, khóa ngoại) CHỈ CHO các bảng thuộc table_names.
+        Dành riêng cho Node 1B & Node 2 sinh câu lệnh SQL.
+        """
+        data = self.load_local_cache()
+        all_tables = data.get("tables", {})
+        filter_names = set(str(t).strip().lower() for t in table_names)
+
+        schema_lines = []
+        for t_name, tbl in all_tables.items():
+            if t_name.lower() in filter_names:
+                t_desc = tbl.get("description", "")
+                cols_desc = []
+                for c in tbl.get("columns", []):
+                    c_name = c.get("name", "")
+                    c_type = c.get("type", "")
+                    c_desc = c.get("description", "")
+                    col_str = f"{c_name} ({c_type})" + (f": {c_desc}" if c_desc else "")
+                    cols_desc.append(col_str)
+
+                fks_desc = []
+                for fk in tbl.get("foreign_keys", []):
+                    src_cols = ", ".join(fk.get("columns", []))
+                    t_tbl = fk.get("target_table", "")
+                    t_col = fk.get("target_column", "")
+                    fks_desc.append(f"FK({src_cols}) -> {t_tbl}({t_col})")
+
+                cols_str = "\n    - ".join(cols_desc) if cols_desc else "Không có cột"
+                fks_str = ("\n  Khóa Ngoại FKs:\n    - " + "\n    - ".join(fks_desc)) if fks_desc else ""
+                desc_str = f" ({t_desc})" if t_desc else ""
+                schema_lines.append(f"• BẢNG `{t_name}`{desc_str}:\n  Các cột:\n    - {cols_str}{fks_str}")
+
+        return "\n\n".join(schema_lines)
+
+# Instance singleton (Khởi động hệ thống -> Nạp luôn dữ liệu vào RAM 1 lần duy nhất)
 om_client = OpenMetadataClient()
+try:
+    om_client.load_local_cache()
+except Exception as e:
+    print(f"[METADATA WARN] Startup cache load error: {e}")

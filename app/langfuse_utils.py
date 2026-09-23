@@ -26,6 +26,8 @@ def _ensure_env_vars():
     if config.LANGFUSE_HOST:
         os.environ["LANGFUSE_HOST"] = config.LANGFUSE_HOST
         os.environ["LANGFUSE_BASE_URL"] = config.LANGFUSE_HOST
+    timeout_val = getattr(config, "LANGFUSE_TIMEOUT", 15)
+    os.environ["LANGFUSE_TIMEOUT"] = str(timeout_val)
 
 
 def get_langfuse_client():
@@ -51,15 +53,17 @@ def get_langfuse_client():
         try:
             _ensure_env_vars()
             from langfuse import Langfuse
+            timeout_val = getattr(config, "LANGFUSE_TIMEOUT", 15)
             _langfuse_client = Langfuse(
                 public_key=config.LANGFUSE_PUBLIC_KEY,
                 secret_key=config.LANGFUSE_SECRET_KEY,
-                host=config.LANGFUSE_HOST
+                host=config.LANGFUSE_HOST,
+                timeout=timeout_val
             )
-            print("[LANGFUSE SINGLETON]: Da khoi tao Langfuse Client dung chung thanh cong!")
+            print("[LANGFUSE] Client initialized.")
             return _langfuse_client
         except Exception as e:
-            print(f"[LANGFUSE SINGLETON ERROR]: Khong the khoi tao Langfuse Client ({e})")
+            print(f"[LANGFUSE ERROR] Failed to initialize client: {e}")
             return None
 
 

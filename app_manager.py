@@ -1,9 +1,12 @@
 import sys
 import time
+import warnings
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
+
+warnings.filterwarnings("ignore", message=".*use_container_width.*")
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")

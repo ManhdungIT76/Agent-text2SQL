@@ -44,6 +44,6 @@ class Config:
     ).strip('"')
     LANGFUSE_PROMPT_LABEL: str = os.getenv("LANGFUSE_PROMPT_LABEL", "").strip('"')
     LANGFUSE_PROMPT_VERSION: str = os.getenv("LANGFUSE_PROMPT_VERSION", "").strip('"')
-
+    LANGFUSE_TIMEOUT: int = int(os.getenv("LANGFUSE_TIMEOUT", "15"))
 config = Config()
 

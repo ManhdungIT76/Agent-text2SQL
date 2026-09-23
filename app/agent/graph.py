@@ -4,13 +4,14 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt, Command
 
 from app.agent.sub_agents import schema_analyst_agent, sql_generator_agent, safety_risk_agent
-from app.llm.client import correct_sql
+from app.llm.client import correct_sql, contextualize_question
 from app.database.connection import get_db_connection
 from app.database.executor import execute_sql
 
 
 class AgentState(TypedDict):
     question: str
+    chat_history: Optional[list]
     schema_context: str
     seed_tables: Optional[list]
     retrieved_tables: Optional[list]
@@ -26,18 +27,36 @@ class AgentState(TypedDict):
     max_retries: int
 
 
-# Nút 1: Sub-Agent 1 (Schema & Intent Analyst)
-def retrieve_schema_node(state: AgentState) -> dict:
+# Step 1: Sub-Agent 1 (Query Contextualizer & Rewriter)
+def contextualize_query_node(state: AgentState) -> dict:
+    raw_question = state["question"]
+    print("\n================================================================================")
+    print(f"[USER QUERY] \"{raw_question}\"")
+    print("================================================================================")
+    history = state.get("chat_history") or []
+    standalone_question = contextualize_question(raw_question, chat_history=history)
+    return {"question": standalone_question}
+
+
+# Step 2: Sub-Agent 2 (Intent & Table Selector)
+def select_entity_tables_node(state: AgentState) -> dict:
     question = state["question"]
-    context, seed_tables, retrieved_tables = schema_analyst_agent.analyze_schema_detailed(question)
+    seed_tables = schema_analyst_agent.select_entity_tables(question)
+    return {"seed_tables": seed_tables}
+
+
+# Step 3: Sub-Agent 3 (GraphDB Expansion & Context Enricher)
+def expand_graph_schema_node(state: AgentState) -> dict:
+    seed_tables = state.get("seed_tables") or []
+    context, clean_seeds, retrieved_tables = schema_analyst_agent.expand_schema_context(seed_tables)
     return {
         "schema_context": context,
-        "seed_tables": seed_tables,
+        "seed_tables": clean_seeds,
         "retrieved_tables": retrieved_tables
     }
 
 
-# Nút 2: Sub-Agent 2 (SQL Specialist Generator)
+# Step 4: Sub-Agent 4 (SQL Specialist Generator)
 def generate_sql_node(state: AgentState) -> dict:
     question = state["question"]
     context = state["schema_context"]
@@ -45,7 +64,7 @@ def generate_sql_node(state: AgentState) -> dict:
     return {"sql": sql, "error_message": None}
 
 
-# Nút 3: Sub-Agent 3 (Safety & Risk Assessment)
+# Step 5: Sub-Agent 5 (Safety & Risk Assessment)
 def evaluate_safety_node(state: AgentState) -> dict:
     question = state["question"]
     sql = state["sql"]
@@ -58,18 +77,18 @@ def evaluate_safety_node(state: AgentState) -> dict:
     }
 
 
-# Nút 4: Sub-Agent 4 (Human-in-the-Loop Approval Controller)
+# Human-in-the-Loop Approval Controller
 def human_approval_node(state: AgentState) -> dict:
     requires_appr = state.get("requires_approval", False)
     is_blocked = state.get("is_blocked", False)
     status = state.get("approval_status")
 
     if is_blocked:
-        print(f"⛔ [SECURITY POLICY]: {state.get('risk_reason')}")
+        print(f"[STEP 5: SAFETY] BLOCKED: {state.get('risk_reason')}")
         return {"approval_status": "BLOCKED"}
 
     if requires_appr and not status:
-        print("\n🛑 [LANGGRAPH HITL INTERRUPT]: Phát hiện thao tác nguy hiểm! Đang tạm dừng luồng chờ Admin duyệt...")
+        print("\n[HITL] Interrupting flow for admin approval...")
         user_response = interrupt({
             "type": "HUMAN_APPROVAL_REQUIRED",
             "question": state["question"],
@@ -82,31 +101,31 @@ def human_approval_node(state: AgentState) -> dict:
         res_str = str(user_response).strip().lower()
         if res_str in ["y", "yes", "approve", "1", "true"]:
             approved_status = "APPROVED"
-            print("✅ [HITL DECISION]: Người dùng / Admin đã BẬT ĐÈN XANH phê duyệt cho phép thực thi.")
+            print("[HITL] Decision -> APPROVED")
         else:
             approved_status = "REJECTED"
-            print("🚫 [HITL DECISION]: Người dùng / Admin đã TỪ CHỐI phê duyệt thực thi câu lệnh SQL này.")
+            print("[HITL] Decision -> REJECTED")
 
         return {"approval_status": approved_status}
 
     return {}
 
 
-# Nút 5: Thực thi SQL trên PostgreSQL
+# Step 6: Thực thi SQL trên PostgreSQL
 def execute_sql_node(state: AgentState) -> dict:
     is_blocked = state.get("is_blocked", False)
     requires_appr = state.get("requires_approval", False)
     approval_status = state.get("approval_status")
 
     if is_blocked or approval_status == "BLOCKED":
-        msg = f"🚫 [HỦY THỰC THI]: {state.get('risk_reason', 'Chính sách bảo mật STRICT READ-ONLY đã chặn thao tác này.')}"
+        msg = f"[STEP 6: EXECUTE] Aborted: {state.get('risk_reason', 'Strict Read-Only policy enforced.')}"
         return {
             "query_result": None,
             "error_message": msg
         }
 
     if requires_appr and approval_status == "REJECTED":
-        msg = "🚫 [HỦY THỰC THI]: Thao tác bị hủy bỏ do từ chối phê duyệt Human-in-the-Loop."
+        msg = "[STEP 6: EXECUTE] Aborted: Rejected by HITL administrator."
         return {
             "query_result": None,
             "error_message": msg
@@ -116,23 +135,24 @@ def execute_sql_node(state: AgentState) -> dict:
     db = get_db_connection()
     try:
         results = execute_sql(db, sql)
+        row_count = len(results) if isinstance(results, list) else 0
+        print(f"[STEP 6: EXECUTE] Query executed successfully on PostgreSQL ({row_count} rows returned).")
         return {"query_result": results, "error_message": None}
     except Exception as e:
         error_str = str(e)
         return {"query_result": None, "error_message": error_str}
 
 
-# Nút 6: LangGraph Self-Correction Loop
+# LangGraph Self-Correction Loop
 def correct_sql_node(state: AgentState) -> dict:
     question = state["question"]
     failed_sql = state["sql"]
     error_msg = state["error_message"]
     context = state["schema_context"]
     retry_count = state.get("retry_count", 0) + 1
+    err_line = error_msg.splitlines()[0] if error_msg else "Unknown DB error"
 
-    print(f"\n🔄 [LANGGRAPH SELF-CORRECTION LOOP (Lần {retry_count})]:")
-    print(f"   ⚠️ Lỗi gặp phải từ PostgreSQL:\n   >>> {error_msg.splitlines()[0] if error_msg else ''}")
-    print(f"   🧠 Đang đưa Traceback lỗi vào LLM để tự động điều chỉnh SQL...")
+    print(f"[SELF-CORRECT] Retry {retry_count}/3 -> Error: {err_line}")
 
     fixed_sql = correct_sql(
         question=question,
@@ -140,7 +160,7 @@ def correct_sql_node(state: AgentState) -> dict:
         error_msg=error_msg,
         schema_context=context
     )
-    print(f"   ✨ [CÂU LỆNH SQL ĐÃ ĐƯỢC SỬA TỰ ĐỘNG]:\n   >>> {fixed_sql}\n")
+    print(f"[SELF-CORRECT] Fixed SQL -> {fixed_sql}")
     return {"sql": fixed_sql, "retry_count": retry_count, "error_message": None}
 
 
@@ -161,9 +181,10 @@ def should_continue_after_execution(state: AgentState) -> str:
         if retry_count < max_retries:
             return "correct_sql"
         else:
-            print(f"⚠️ [LANGGRAPH ALERT]: Đã thử tự động sửa lỗi quá {max_retries} lần nhưng chưa thành công.")
+            print(f"[ERROR] Self-Correction exceeded max retries ({max_retries}/{max_retries}). Query execution aborted.")
             return END
     return END
+
 
 
 def create_text2sql_graph(checkpointer: Optional[Any] = None):
@@ -171,7 +192,9 @@ def create_text2sql_graph(checkpointer: Optional[Any] = None):
     workflow = StateGraph(AgentState)
 
     # Thêm các Nút (Nodes)
-    workflow.add_node("retrieve_schema", retrieve_schema_node)
+    workflow.add_node("contextualize_query", contextualize_query_node)
+    workflow.add_node("select_entity_tables", select_entity_tables_node)
+    workflow.add_node("expand_graph_schema", expand_graph_schema_node)
     workflow.add_node("generate_sql", generate_sql_node)
     workflow.add_node("evaluate_safety", evaluate_safety_node)
     workflow.add_node("human_approval", human_approval_node)
@@ -179,11 +202,14 @@ def create_text2sql_graph(checkpointer: Optional[Any] = None):
     workflow.add_node("correct_sql", correct_sql_node)
 
     # Thiết lập Luồng thực thi (Edges)
-    workflow.set_entry_point("retrieve_schema")
-    workflow.add_edge("retrieve_schema", "generate_sql")
+    workflow.set_entry_point("contextualize_query")
+    workflow.add_edge("contextualize_query", "select_entity_tables")
+    workflow.add_edge("select_entity_tables", "expand_graph_schema")
+    workflow.add_edge("expand_graph_schema", "generate_sql")
     workflow.add_edge("generate_sql", "evaluate_safety")
     workflow.add_edge("evaluate_safety", "human_approval")
     workflow.add_edge("human_approval", "execute_sql")
+
 
     # Thêm rẽ nhánh điều kiện sau Nút execute_sql
     workflow.add_conditional_edges(

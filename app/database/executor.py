@@ -6,8 +6,8 @@ def execute_sql(db: SQLDatabase, sql_query: str):
     """Thực thi câu lệnh SQL trên PostgreSQL Docker và trả về danh sách bản ghi kèm tên cột"""
     clean_query = sql_query.strip()
     try:
-        # Nếu là câu lệnh SELECT, trả về danh sách dicts có tên cột chuẩn xác
-        if clean_query.upper().startswith("SELECT"):
+        # Nếu là câu lệnh SELECT hoặc WITH (CTE), trả về danh sách dicts có tên cột chuẩn xác
+        if clean_query.upper().startswith("SELECT") or clean_query.upper().startswith("WITH"):
             with db._engine.connect() as conn:
                 res = conn.execute(text(clean_query))
                 cols = list(res.keys())
