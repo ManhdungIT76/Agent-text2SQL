@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from typing import Dict, Any, Optional
 from app.llm.client import get_llm_model
 from app.database.connection import get_db_connection
@@ -10,8 +11,23 @@ class Text2SQLEvaluator:
     """Bộ đánh giá tự động đa chiều cho Text2SQL Agent (Execution Accuracy + LLM-as-a-Judge)"""
 
     def __init__(self):
-        self.db = get_db_connection()
-        self.llm = get_llm_model()
+        # FIX #6: Lazy init – chỉ kết nối DB/LLM khi thực sự cần, tránh crash khi import
+        self._db = None
+        self._llm = None
+
+    @property
+    def db(self):
+        """Lazy init DB connection – kết nối khi method evaluate_* được gọi lần đầu"""
+        if self._db is None:
+            self._db = get_db_connection()
+        return self._db
+
+    @property
+    def llm(self):
+        """Lazy init LLM – khởi tạo khi LLM Judge được gọi lần đầu"""
+        if self._llm is None:
+            self._llm = get_llm_model()
+        return self._llm
 
     def evaluate_execution(self, generated_sql: str, golden_sql: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -21,7 +37,8 @@ class Text2SQLEvaluator:
             "exec_success": False,
             "row_count": 0,
             "error": None,
-            "matches_golden": False
+            "matches_golden": False,
+            "row_count_golden": None
         }
 
         if not generated_sql or not generated_sql.strip():
@@ -37,11 +54,10 @@ class Text2SQLEvaluator:
             if golden_sql:
                 try:
                     gold_rows = execute_sql(self.db, golden_sql)
+                    result["row_count_golden"] = len(gold_rows)
+                    # FIX #3: matches_golden chỉ True khi số dòng BẰNG NHAU
+                    # Đã xóa elif (cả 2 != 0 là True) – logic sai gây metric ảo
                     if len(gen_rows) == len(gold_rows):
-                        # So sánh số hàng hoặc nội dung tổng quan
-                        result["matches_golden"] = True
-                    elif len(gen_rows) > 0 and len(gold_rows) > 0:
-                        # Kết quả không rỗng
                         result["matches_golden"] = True
                 except Exception as ge:
                     pass
@@ -130,7 +146,8 @@ Trả về ĐÚNG 1 JSON Object duy nhất (không chứa văn bản phụ), d�
             except Exception as e:
                 err_str = str(e)
                 if "rate_limit" in err_str.lower() or "429" in err_str:
-                    time.sleep(2.5)
+                    print(f"⚠️ [EVALUATOR]: Rate limit, chờ 2.5s rồi retry (lần {attempt + 1}/2)...")
+                    time.sleep(2.5)  # FIX #1: Không còn crash NameError
                     continue
                 print(f"⚠️ [EVALUATOR LLM ERROR]: {e}")
                 break

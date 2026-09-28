@@ -10,8 +10,13 @@ warnings.filterwarnings("ignore", message=".*use_container_width.*")
 from app.agent.graph import text2sql_agent_graph, get_langfuse_handler
 from app.metadata.openmetadata_client import om_client
 from app.langfuse_utils import create_trace_handler, flush_all, check_langfuse_connection
-from app.llm.prompts import TABLE_SELECTION_PROMPT_TEMPLATE, build_system_prompt_v2, get_display_prompt_text
-
+from app.llm.prompts import (
+    TABLE_SELECTION_PROMPT_TEMPLATE, 
+    build_system_prompt_v2, 
+    get_display_prompt_text,
+    CORRECTION_PROMPT_TEMPLATE,
+    CONTEXTUALIZE_PROMPT_TEMPLATE
+)
 
 
 
@@ -213,12 +218,20 @@ with st.sidebar:
     
     prompt_1_display = get_display_prompt_text("text2sql-table-selector", TABLE_SELECTION_PROMPT_TEMPLATE)
     prompt_2_display = get_display_prompt_text("text2sql-generator", build_system_prompt_v2("{schema_context}"))
+    prompt_3_display = get_display_prompt_text("text2sql-self-corrector", CORRECTION_PROMPT_TEMPLATE)
+    prompt_4_display = get_display_prompt_text("text2sql-contextualizer", CONTEXTUALIZE_PROMPT_TEMPLATE)
 
     with st.expander("📝 PROMPT 1 (text2sql-table-selector)"):
         st.code(prompt_1_display, language="markdown")
         
     with st.expander("💻 PROMPT 2 (text2sql-generator)"):
         st.code(prompt_2_display, language="markdown")
+
+    with st.expander("🔧 PROMPT 3 (text2sql-self-corrector)"):
+        st.code(prompt_3_display, language="markdown")
+
+    with st.expander("🔄 PROMPT 4 (text2sql-contextualizer)"):
+        st.code(prompt_4_display, language="markdown")
 
 
 

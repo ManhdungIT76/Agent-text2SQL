@@ -2,7 +2,6 @@ import re
 from app.config import config
 from app.llm.prompts import get_text2sql_prompt, build_correction_prompt
 from app.database.schema import get_dynamic_schema_context
-
 def clean_sql(raw_output) -> str:
     """Trích xuất câu lệnh SQL sạch từ output của AI (loại bỏ think block, markdown block, văn bản giải thích)"""
     if isinstance(raw_output, list):
@@ -14,15 +13,20 @@ def clean_sql(raw_output) -> str:
     if "<think>" in sql:
         sql = re.sub(r'<think>.*?</think>', '', sql, flags=re.DOTALL).strip()
         
-    # 2. Trích xuất khối mã Markdown ```sql ... ``` nếu có
-    sql_match = re.search(r'```(?:sql)?\s*((?:WITH|SELECT).*?)```', sql, re.DOTALL | re.IGNORECASE)
-    if sql_match:
-        sql = sql_match.group(1).strip()
+    # 1.5 Trích xuất SQL nếu LLM trả về trong thẻ <sql>...</sql>
+    xml_sql_match = re.search(r'<sql>\s*(.*?)\s*</sql>', sql, re.DOTALL | re.IGNORECASE)
+    if xml_sql_match:
+        sql = xml_sql_match.group(1).strip()
     else:
-        # 3. Tìm từ câu lệnh WITH hoặc SELECT đầu tiên nếu không có khối markdown
-        select_match = re.search(r'\b((?:WITH|SELECT)\b.*)', sql, re.DOTALL | re.IGNORECASE)
-        if select_match:
-            sql = select_match.group(1).strip()
+        # 2. Trích xuất khối mã Markdown ```sql ... ``` nếu có
+        sql_match = re.search(r'```(?:sql)?\s*((?:WITH|SELECT).*?)```', sql, re.DOTALL | re.IGNORECASE)
+        if sql_match:
+            sql = sql_match.group(1).strip()
+        else:
+            # 3. Tìm từ câu lệnh WITH hoặc SELECT đầu tiên nếu không có khối markdown
+            select_match = re.search(r'\b((?:WITH|SELECT)\b.*)', sql, re.DOTALL | re.IGNORECASE)
+            if select_match:
+                sql = select_match.group(1).strip()
 
     # Dọn dẹp ký tự markdown còn sót
     if sql.startswith("```sql"):

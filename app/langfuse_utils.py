@@ -26,7 +26,7 @@ def _ensure_env_vars():
     if config.LANGFUSE_HOST:
         os.environ["LANGFUSE_HOST"] = config.LANGFUSE_HOST
         os.environ["LANGFUSE_BASE_URL"] = config.LANGFUSE_HOST
-    timeout_val = getattr(config, "LANGFUSE_TIMEOUT", 15)
+    timeout_val = getattr(config, "LANGFUSE_TIMEOUT", 7)
     os.environ["LANGFUSE_TIMEOUT"] = str(timeout_val)
 
 

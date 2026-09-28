@@ -39,27 +39,7 @@ def extract_dynamic_foreign_keys_from_db() -> Dict[str, list]:
                         "target_column": ref_cols[0] if ref_cols else src_cols[0]
                     })
 
-            # 2. Tự động phát hiện các FKs dựa trên phân tích tên cột (*_id -> target table)
-            cols = inspector.get_columns(tbl, schema="public")
-            for c in cols:
-                col_name = c["name"]
-                if col_name.endswith("_id") and col_name != f"{tbl}_id" and col_name != "id":
-                    target_candidate = col_name[:-3]
-                    # Nếu tên cột có prefix (ví dụ manager_staff_id), thử tìm tên bảng tương ứng (staff)
-                    if target_candidate not in base_tables and "_" in target_candidate:
-                        possible_table = target_candidate.split("_")[-1]
-                        if possible_table in base_tables:
-                            target_candidate = possible_table
 
-                    if target_candidate in base_tables:
-                        already_has = any(fk["target_table"] == target_candidate and col_name in fk["columns"] for fk in tbl_fks)
-                        if not already_has:
-                            target_pk = f"{target_candidate}_id"
-                            tbl_fks.append({
-                                "columns": [col_name],
-                                "target_table": target_candidate,
-                                "target_column": target_pk
-                            })
 
             dynamic_fks[tbl] = tbl_fks
         return dynamic_fks
@@ -210,6 +190,34 @@ class OpenMetadataClient:
     def reload_cache(self) -> Dict[str, Any]:
         """Ép buộc xóa bộ nhớ RAM và làm mới Metadata từ OpenMetadata API"""
         return self.load_local_cache(force_refresh=True)
+
+    def patch_table_or_column_description(self, tbl_id: str, patch_ops: list) -> bool:
+        """Gửi JSON Patch để cập nhật mô tả của Table hoặc Column"""
+        token = self.get_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json-patch+json"
+        }
+        url = f"{self.api_url}/tables/{tbl_id}"
+        try:
+            resp = requests.patch(url, headers=headers, json=patch_ops, timeout=10)
+            return resp.status_code in [200, 204]
+        except Exception as e:
+            print(f"[OM PATCH ERROR] {e}")
+            return False
+
+    def add_foreign_key_constraint(self, tbl_id: str, col_name: str, target_fqn: str) -> bool:
+        """Gửi JSON Patch để bổ sung Khóa ngoại"""
+        patch_ops = [{
+            "op": "add",
+            "path": "/tableConstraints/-",
+            "value": {
+                "constraintType": "FOREIGN_KEY",
+                "columns": [col_name],
+                "referredColumns": [target_fqn]
+            }
+        }]
+        return self.patch_table_or_column_description(tbl_id, patch_ops)
 
 
 

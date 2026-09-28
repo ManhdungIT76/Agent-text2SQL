@@ -32,6 +32,24 @@ services:
     networks:
       - text2sql-network
 
+  # 2.5. OPENMETADATA DB MIGRATION (Tạo bảng tự động cho OM - chạy 1 lần rồi tự tắt)
+  db-migration:
+    image: openmetadata/server:latest
+    container_name: text2sql-db-migration
+    environment:
+      DB_HOST: postgres-db
+      DB_PORT: 5432
+      DB_USER: admin
+      DB_USER_PASSWORD: password123
+      DB_NAME: openmetadata_db
+      DB_SCHEME: postgresql
+      DB_DRIVER_CLASS: org.postgresql.Driver
+    command: ["-c", "./bootstrap/openmetadata-ops.sh migrate"]
+    networks:
+      - text2sql-network
+    depends_on:
+      - postgres-db
+
   # 3. OPENMETADATA SERVER (Hệ thống quản lý dữ liệu tập trung)
   openmetadata:
     image: openmetadata/server:latest
@@ -61,6 +79,7 @@ services:
     depends_on:
       - postgres-db
       - opensearch
+      - db-migration
 
   # 4. OPENMETADATA INGESTION ENGINE (Tự động quét metadata, nối bảng & tự cập nhật)
   ingestion:

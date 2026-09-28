@@ -32,133 +32,77 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
 
-def auto_provision_database_and_services(engine: Any, service_name: str = "Postgres_Service") -> dict[str, Any]:
-    """
-    HÀM 1: TỰ ĐỘNG KHỞI TẠO SERVICE, DATABASE, SCHEMA VÀ UPLOAD TOÀN BỘ BẢNG CHÍNH + CỘT
-    ----------------------------------------------------------------------------
-    Chức năng:
-    - Kiểm tra và tự động tạo mới DatabaseService (`Postgres_Service`) trên OpenMetadata.
-    - Tạo Database (`dvdrental`) và DatabaseSchema (`public`).
-    - Quét danh sách các BẢNG CHÍNH (bỏ qua Views) trong CSDL PostgreSQL và upload
-      toàn bộ cấu trúc Bảng + Cột lên OpenMetadata API.
-    """
-    print(f"\n🚀 [BƯỚC 1]: Đang khởi tạo Service '{service_name}', Database '{config.DB_NAME}' & Upload toàn bộ Bảng/Cột...")
-    
-    # 1.1 Khởi tạo Service trên OpenMetadata
-    service_info = om_client.get_or_create_database_service(
-        service_name=service_name,
-        db_type="Postgres",
-        host_port=f"{config.DB_HOST}:{config.DB_PORT}"
-    )
-    
-    # 1.2 Khởi tạo Database trên OpenMetadata
-    db_info = om_client.get_or_create_database(
-        service_name=service_name,
-        db_name=config.DB_NAME
-    )
-
-    # 1.3 Khởi tạo Schema trên OpenMetadata
-    schema_info = om_client.get_or_create_database_schema(
-        service_name=service_name,
-        db_name=config.DB_NAME,
-        schema_name="public"
-    )
-
-    # 1.4 Quét CSDL PostgreSQL thực tế và upload toàn bộ Bảng chính + Cột
-    inspector = inspect(engine)
-    all_table_names = inspector.get_table_names(schema="public")
-    view_names = set(inspector.get_view_names(schema="public"))
-    base_tables = [t for t in all_table_names if t not in view_names]
-
-    print(f"📦 Đang đẩy {len(base_tables)} Bảng chính từ PostgreSQL CSDL lên OpenMetadata API...")
-    uploaded_tables = []
-    for tbl in base_tables:
-        cols_info = inspector.get_columns(tbl, schema="public")
-        tbl_entity = om_client.create_table_entity(
-            service_name=service_name,
-            db_name=config.DB_NAME,
-            schema_name="public",
-            table_name=tbl,
-            columns=cols_info
-        )
-        if tbl_entity:
-            uploaded_tables.append(tbl)
-    
-    print(f"✅ [HOÀN TẤT BƯỚC 1]: Đã đẩy thành công {len(uploaded_tables)}/{len(base_tables)} Bảng chính kèm Cột lên OpenMetadata!")
-    return {"service": service_info, "database": db_info, "schema": schema_info, "tables": uploaded_tables}
-
-
 def check_and_log_relationships(engine: Any, schema_name: str = "public") -> dict[str, Any]:
     """
-    HÀM 2: KIỂM TRA QUAN HỆ BẢNG & TỰ ĐỘNG BỔ SUNG CÁC RÀNG BUỘC FK BỊ THIẾU LÊN OPENMETADATA
+    HÀM 1: ĐỐI CHIẾU QUAN HỆ BẢNG (COMPARE POSTGRESQL VS OPENMETADATA)
     ----------------------------------------------------------------------------
     Chức năng:
-    - Quét danh sách các BẢNG CHÍNH (Base Tables), bỏ qua các Bảng View.
-    - Xuất log ✅ thành công cho các quan hệ FK chính thức.
-    - Phân tích gợi ý ⚠️ các quan hệ bị thiếu (Missing FK candidates) và TỰ ĐỘNG PATCH
-      ràng buộc Khóa ngoại mới này lên OpenMetadata API!
+    - Quét các ràng buộc Khóa ngoại (FK) thực tế trong PostgreSQL.
+    - Lấy thông tin tableConstraints từ OpenMetadata API.
+    - So sánh: Nếu Khóa ngoại có ở DB nhưng thiếu trên OM -> Tự động PATCH bổ sung lên OM.
     """
-    print(f"\n🔍 [BƯỚC 2]: Đang kiểm tra & tự động vá các ràng buộc Khóa ngoại (FK) bị thiếu lên OpenMetadata...")
+    print(f"\n🔍 [BƯỚC 1]: Đang đối chiếu Khóa ngoại (FK) giữa PostgreSQL và OpenMetadata...")
     
     inspector = inspect(engine)
     all_table_names = inspector.get_table_names(schema=schema_name)
     view_names = set(inspector.get_view_names(schema=schema_name))
     
     base_tables = [t for t in all_table_names if t not in view_names]
-    existing_fks: list[dict[str, Any]] = []
-    missing_fk_candidates: list[dict[str, Any]] = []
+    synced_fks = []
     
+    token = om_client.get_token()
+    headers = {"Authorization": f"Bearer {token}"}
+
     for idx, tbl in enumerate(base_tables, 1):
-        print(f"\n   📋 [{idx}/{len(base_tables)}] Đang kiểm tra Bảng chính `{tbl}`:")
-        fks = inspector.get_foreign_keys(tbl, schema=schema_name)
-        cols = [c["name"] for c in inspector.get_columns(tbl, schema=schema_name)]
+        print(f"\n   📋 [{idx}/{len(base_tables)}] Đang đối chiếu Bảng `{tbl}`:")
         
-        if fks:
-            for fk in fks:
-                target_table = fk.get("referred_table")
-                constrained_cols = fk.get("constrained_columns", [])
-                referred_cols = fk.get("referred_columns", [])
-                existing_fks.append({
-                    "source_table": tbl,
-                    "source_cols": constrained_cols,
-                    "target_table": target_table,
-                    "target_cols": referred_cols
-                })
-                print(f"      ✅ [FK FOUND]: `{tbl}`({', '.join(constrained_cols)}) ➔ `{target_table}`({', '.join(referred_cols)})")
-        else:
-            print(f"      ℹ️ Bảng `{tbl}` không chứa ràng buộc Khóa ngoại (FK) mặc định trong CSDL.")
+        # 1. Lấy FKs trực tiếp từ CSDL PostgreSQL
+        pg_fks = inspector.get_foreign_keys(tbl, schema=schema_name)
+        if not pg_fks:
+            print(f"      ℹ️ Bảng `{tbl}` không có Khóa ngoại trong PostgreSQL.")
+            continue
+            
+        # 2. Lấy thông tin Constraints hiện tại từ OpenMetadata
+        # Chú ý: Dùng OM_SERVICE_NAME từ config để chuẩn hóa FQN
+        fqn = f"{config.OM_SERVICE_NAME}.{config.DB_NAME}.{schema_name}.{tbl}"
+        om_res = requests.get(f"{om_client.api_url}/tables/name/{fqn}?fields=tableConstraints", headers=headers, timeout=5)
+        
+        if om_res.status_code != 200:
+            print(f"      ⚠️ Lỗi: Không thể lấy dữ liệu bảng `{tbl}` từ OpenMetadata (Status: {om_res.status_code}).")
+            continue
+            
+        om_data = om_res.json()
+        tbl_id = om_data.get("id")
+        om_constraints = om_data.get("tableConstraints", [])
+        
+        # Gom danh sách các cột đã được cấu hình FK trên OpenMetadata
+        om_fk_columns = []
+        for constraint in om_constraints:
+            if constraint.get("constraintType") == "FOREIGN_KEY":
+                om_fk_columns.extend(constraint.get("columns", []))
+                
+        # 3. So sánh (Compare) và Vá (Patch)
+        for fk in pg_fks:
+            target_table = fk.get("referred_table")
+            constrained_cols = fk.get("constrained_columns", [])
+            referred_cols = fk.get("referred_columns", [])
+            
+            for col in constrained_cols:
+                # Nếu Postgres có mà OM không có -> Đẩy lên OM
+                if col not in om_fk_columns:
+                    print(f"      ⚠️ [MISSING IN OM]: FK `{col}` -> `{target_table}` có trong PG nhưng thiếu trên OM. Đang đồng bộ...")
+                    try:
+                        target_fqn = f"{config.OM_SERVICE_NAME}.{config.DB_NAME}.{schema_name}.{target_table}.{referred_cols[0]}"
+                        om_client.add_foreign_key_constraint(tbl_id, col, target_fqn)
+                        synced_fks.append({"table": tbl, "column": col, "target": target_table})
+                        print(f"      ✅ Đã đồng bộ FK thành công!")
+                    except Exception as e:
+                        print(f"      ❌ Lỗi đồng bộ FK: {e}")
+                else:
+                    print(f"      ✅ [MATCHED]: FK `{col}` -> `{target_table}` đã khớp giữa PG và OM.")
 
-        # 2.2 TỰ ĐỘNG VÁ KHÓA NGOẠI BỊ THIẾU
-        for col in cols:
-            if col.endswith("_id") and col != f"{tbl}_id" and col != "id":
-                target_candidate = col[:-3] # Ví dụ: store_id -> store
-                if target_candidate in base_tables:
-                    is_already_fk = any(
-                        fk["source_table"] == tbl and col in fk["source_cols"]
-                        for fk in existing_fks
-                    )
-                    if not is_already_fk:
-                        missing_fk_candidates.append({
-                            "source_table": tbl,
-                            "column": col,
-                            "suggested_target_table": target_candidate
-                        })
-                        print(f"      ⚠️ [MISSING FK FOUND]: Cột `{col}` của Bảng `{tbl}` thiếu FK constraint nối với Bảng `{target_candidate}` trong CSDL!")
-                        
-                        # Gọi API OpenMetadata để lấy table_id và tự động patch FK
-                        try:
-                            headers = om_client.get_headers()
-                            fqn = f"Postgres_Service.{config.DB_NAME}.{schema_name}.{tbl}"
-                            tbl_res = requests.get(f"{om_client.api_url}/tables/name/{fqn}", headers=headers, timeout=5)
-                            if tbl_res.status_code == 200:
-                                tbl_id = tbl_res.json().get("id")
-                                target_fqn = f"Postgres_Service.{config.DB_NAME}.{schema_name}.{target_candidate}.{col}"
-                                om_client.add_foreign_key_constraint(tbl_id, col, target_fqn)
-                        except Exception as patch_err:
-                            print(f"      ⚠️ Lỗi tự động vá FK: {patch_err}")
-
-    print(f"\n📊 [TỔNG KẾT BƯỚC 2]: Đã quét {len(base_tables)} Bảng chính. Tìm thấy {len(existing_fks)} FKs hợp lệ và đã tự động xử lý {len(missing_fk_candidates)} FKs bị thiếu!")
-    return {"existing_fks": existing_fks, "missing_candidates": missing_fk_candidates}
+    print(f"\n📊 [TỔNG KẾT BƯỚC 1]: Đã đồng bộ bổ sung {len(synced_fks)} Khóa ngoại lên OpenMetadata!")
+    return {"synced_fks": synced_fks}
 
 
 def get_sample_data_for_table(engine: Any, table_name: str, schema_name: str = "public", limit: int = 2) -> list[dict[str, Any]]:
@@ -248,7 +192,7 @@ Nhiệm vụ của bạn là phân tích tên Bảng, danh sách Cột và Dữ 
         return default_fallback
 
 
-def auto_generate_and_patch_descriptions(engine: Any, service_name: str = "Postgres_Service", force_update: bool = True) -> int:
+def auto_generate_and_patch_descriptions(engine: Any, service_name: str = "Postgres_Service", force_update: bool = False) -> int:
     """
     HÀM 3: TỰ ĐỘNG SINH & ĐÈ MÔ TẢ TIẾNG VIỆT PHONG PHÚ CHO TẤT CẢ BẢNG VÀ CỘT LÊN OPENMETADATA
     ----------------------------------------------------------------------------
@@ -290,6 +234,15 @@ def auto_generate_and_patch_descriptions(engine: Any, service_name: str = "Postg
             print(f"   ⏩ [{idx}/{len(tables)}] [SKIP VIEW]: Bảng '{tbl_name}' là View ➔ Bỏ qua không xử lý.")
             continue
 
+        # --- KIỂM TRA MÔ TẢ ĐÃ TỒN TẠI (BẢO VỆ DỮ LIỆU THỦ CÔNG) ---
+        current_table_desc = tbl.get("description", "")
+        missing_col_desc = any(not c.get("description") for c in cols)
+        
+        # Nếu Bảng và tất cả các Cột đều đã có mô tả -> Bỏ qua
+        if current_table_desc and not missing_col_desc and not force_update:
+            print(f"   ⏩ [{idx}/{len(tables)}] [SKIP]: Bảng '{tbl_name}' đã có đầy đủ mô tả. Bỏ qua để tránh ghi đè thủ công.")
+            continue
+            
         print(f"   ⚙️ [{idx}/{len(tables)}] [UPDATING TABLE]: Đang nạp mô tả tiếng Việt chuẩn cho Bảng chính '{tbl_name}' ({len(cols)} cột)...")
         
         # 3.1 Trích xuất 1-2 dòng dữ liệu mẫu
@@ -301,23 +254,27 @@ def auto_generate_and_patch_descriptions(engine: Any, service_name: str = "Postg
         table_desc = llm_output.get("table_description", f"Bảng dữ liệu nghiệp vụ {tbl_name}")
         col_descs = llm_output.get("column_descriptions", {})
 
-        # 3.3 Tạo danh sách thao tác JSON Patch (Đè toàn bộ mô tả bảng và từng cột)
-        patch_ops: list[dict[str, Any]] = [
-            {
+        # 3.3 Tạo danh sách thao tác JSON Patch (Chỉ ghi đè nếu trống)
+        patch_ops: list[dict[str, Any]] = []
+        
+        if not current_table_desc:
+            patch_ops.append({
                 "op": "add",
                 "path": "/description",
                 "value": table_desc
-            }
-        ]
+            })
 
         for c_idx, col in enumerate(cols):
             c_name = col.get("name")
-            c_desc = col_descs.get(c_name, f"Trường thông tin nghiệp vụ {c_name} của bảng {tbl_name}.")
-            patch_ops.append({
-                "op": "add",
-                "path": f"/columns/{c_idx}/description",
-                "value": c_desc
-            })
+            current_col_desc = col.get("description", "")
+            
+            if not current_col_desc:
+                c_desc = col_descs.get(c_name, f"Trường thông tin nghiệp vụ {c_name} của bảng {tbl_name}.")
+                patch_ops.append({
+                    "op": "add",
+                    "path": f"/columns/{c_idx}/description",
+                    "value": c_desc
+                })
 
         # 3.4 Patch lên OpenMetadata API
         if patch_ops and tbl_id:
@@ -334,29 +291,26 @@ def auto_generate_and_patch_descriptions(engine: Any, service_name: str = "Postg
 
 def run_full_governance_pipeline() -> None:
     """
-    HÀM THỰC THI TOÀN BỘ QUY TRÌNH DATA GOVERNANCE TỰ ĐỘNG (Python 3.12 Standard)
+    HÀM THỰC THI TOÀN BỘ QUY TRÌNH DATA GOVERNANCE TỐI ƯU
     """
     print("=================================================================================")
-    print("🚀 BẮT ĐẦU QUY TRÌNH AUTOMATED DATA GOVERNANCE FOR TEXT2SQL (PYTHON 3.12)")
+    print("🚀 BẮT ĐẦU QUY TRÌNH AUTOMATED DATA GOVERNANCE FOR TEXT2SQL")
     print("=================================================================================")
 
     # Khởi tạo SQLAlchemy Engine kết nối CSDL PostgreSQL
     engine = create_engine(config.DB_URI)
     
-    # Bước 1: Khởi tạo Service, Database, Schema và Upload toàn bộ Bảng chính + Cột
-    auto_provision_database_and_services(engine)
-    
-    # Bước 2: Kiểm tra Relationship & xuất Log
+    # Bước 1: Đối chiếu Khóa ngoại (Bỏ phần Auto Provision vì OM đã tự Ingestion)
     check_and_log_relationships(engine)
     
-    # Bước 3: Tự động sinh & Cập nhật mô tả tiếng Việt từ Sample Data + LLM
+    # Bước 2: Tự động sinh & Cập nhật mô tả tiếng Việt từ Sample Data + LLM
     auto_generate_and_patch_descriptions(engine)
     
     # Cập nhật lại Local Disk Cache của OpenMetadataClient
     om_client.sync_cache_from_openmetadata()
     
     print("\n=================================================================================")
-    print("✨ QUY TRÌNH DATA GOVERNANCE HOÀN TẤT THÀNH CÔNG! HỆ THỐNG ĐÃ SẴN SÀNG CHO MCP SERVER.")
+    print("✨ QUY TRÌNH DATA GOVERNANCE HOÀN TẤT THÀNH CÔNG!")
     print("=================================================================================")
 
 
