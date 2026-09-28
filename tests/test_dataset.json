@@ -1,0 +1,32 @@
+[
+  {
+    "id": "TC01",
+    "question": "Cho tôi xem tổng doanh thu bán đĩa phân theo từng thể loại phim?",
+    "golden_sql": "SELECT category, total_sales FROM sales_by_film_category ORDER BY total_sales DESC;",
+    "category": "view_aggregation"
+  },
+  {
+    "id": "TC02",
+    "question": "Cho tôi danh sách các khách hàng có tài khoản đang bị khóa?",
+    "golden_sql": "SELECT customer_id, first_name, last_name, email FROM customer WHERE active = 0;",
+    "category": "filtering"
+  },
+  {
+    "id": "TC03",
+    "question": "Top 5 bộ phim có giá thuê rẻ nhất là những phim nào?",
+    "golden_sql": "SELECT film_id, title, rental_rate FROM film ORDER BY rental_rate ASC LIMIT 5;",
+    "category": "sorting_limit"
+  },
+  {
+    "id": "TC04",
+    "question": "Tổng số tiền thanh toán của từng cửa hàng là bao nhiêu?",
+    "golden_sql": "SELECT store, manager, total_sales FROM sales_by_store ORDER BY total_sales DESC;",
+    "category": "view_aggregation"
+  },
+  {
+    "id": "TC05",
+    "question": "Cho tôi xem 5 diễn viên tham gia nhiều bộ phim nhất?",
+    "golden_sql": "SELECT a.actor_id, a.first_name, a.last_name, COUNT(fa.film_id) AS film_count FROM actor a JOIN film_actor fa ON a.actor_id = fa.actor_id GROUP BY a.actor_id, a.first_name, a.last_name ORDER BY film_count DESC LIMIT 5;",
+    "category": "multi_join_groupby"
+  }
+]
