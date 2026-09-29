@@ -433,6 +433,10 @@ for i, s in enumerate(suggs):
 st.markdown("---")
 
 def render_demo_ui_sections(msg: dict):
+    if msg.get("intent") == "chat":
+        st.markdown(f"**💬 Phản hồi từ Trợ lý:**\n\n{msg.get('query_result', '')}")
+        return
+
     seed_tbls = msg.get("seed_tables") or []
     ret_tbls = msg.get("retrieved_tables") or []
     bridge_tbls = msg.get("bridge_tables") or [t for t in ret_tbls if t not in seed_tbls]
@@ -522,7 +526,8 @@ if question:
             st.write("5️⃣ **GIAI ĐOẠN 5**: Kiểm tra bảo mật Read-Only & Tự động sửa lỗi cú pháp (Self-Correction)...")
 
             init_s = {
-                "question": question, "schema_context": "", "sql": "",
+                "question": question, "intent": None, "chat_history": [],
+                "schema_context": "", "sql": "",
                 "risk_level": None, "risk_reason": None,
                 "requires_approval": False, "is_blocked": False, "approval_status": None,
                 "query_result": None, "error_message": None, "retry_count": 0, "max_retries": 3,
@@ -557,6 +562,8 @@ if question:
 
         msg_data = {
             "role": "assistant",
+            "intent": fs.get("intent", "sql"),
+            "query_result": fs.get("query_result"),
             "seed_tables": seed_tbls,
             "retrieved_tables": ret_tbls,
             "bridge_tables": [t for t in ret_tbls if t not in seed_tbls],

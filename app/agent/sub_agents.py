@@ -65,7 +65,6 @@ class SafetyRiskSubAgent:
             print(f"   {reason}")
             return {
                 "risk_level": "LEVEL_3_BLOCKED",
-                "requires_approval": False,
                 "is_blocked": True,
                 "risk_reason": reason
             }
@@ -76,7 +75,6 @@ class SafetyRiskSubAgent:
             print(f"   [STEP 5: SAFETY] Assessment -> WARN: Missing LIMIT clause.")
             return {
                 "risk_level": "LEVEL_2_WARN",
-                "requires_approval": False,
                 "is_blocked": False,
                 "risk_reason": reason
             }
@@ -84,14 +82,57 @@ class SafetyRiskSubAgent:
         print(f"   [STEP 5: SAFETY] Assessment -> SAFE (Strict Read-Only)")
         return {
             "risk_level": "LEVEL_1_SAFE",
-            "requires_approval": False,
             "is_blocked": False,
             "risk_reason": "Truy vấn READ-ONLY an toàn."
         }
 
 
 
+class IntentRouterSubAgent:
+    """Sub-Agent 0: Phân luồng ý định người dùng (Intent Router) bằng LLM siêu nhẹ"""
+
+    def classify_intent(self, question: str) -> tuple[str, str]:
+        print(f"\n================================================================================")
+        print(f"[STEP 0: INTENT ROUTER] Đang gọi LLM phân loại ý định cho câu hỏi...")
+        print(f"-> User Request: \"{question}\"")
+        
+        try:
+            from app.langfuse_utils import get_langfuse_client
+            lf_client = get_langfuse_client()
+            
+            if not lf_client:
+                raise ValueError("Langfuse SDK chưa được khởi tạo. Vui lòng kiểm tra API Key.")
+                
+            lf_prompt = lf_client.get_prompt("text2sql-intent-router")
+            final_prompt_str = lf_prompt.compile(question=question)
+            print("-> [PROMPT] Tải thành công template 'text2sql-intent-router' từ Langfuse Cloud.")
+            
+            # 2. Gọi LLM
+            from app.llm.client import get_llm_model
+            llm = get_llm_model()
+            response = llm.invoke(final_prompt_str)
+            result = str(response.content).strip()
+            
+            if result.upper().startswith("CHAT|||"):
+                chat_resp = result.split("CHAT|||")[-1].strip()
+                print(f"-> [KẾT QUẢ] Ý định: Giao tiếp xã giao (Chat)")
+                print(f"-> [HÀNH ĐỘNG] Dừng luồng Graph-RAG, trả lời trực tiếp: {chat_resp}")
+                print(f"================================================================================\n")
+                return "chat", chat_resp
+            else:
+                print(f"-> [KẾT QUẢ] Ý định: Truy vấn CSDL (SQL)")
+                print(f"-> [HÀNH ĐỘNG] Chuyển tiếp câu hỏi vào luồng LangGraph Text-to-SQL...")
+                print(f"================================================================================\n")
+                return "sql", ""
+                
+        except Exception as e:
+            print(f"-> [INTENT ERROR] {e} -> Mặc định gán là 'sql' để đảm bảo an toàn.")
+            print(f"================================================================================\n")
+            return "sql", ""
+
+
 # Singletons
+intent_router_agent = IntentRouterSubAgent()
 schema_analyst_agent = SchemaAnalystSubAgent()
 sql_generator_agent = SQLGeneratorSubAgent()
 safety_risk_agent = SafetyRiskSubAgent()

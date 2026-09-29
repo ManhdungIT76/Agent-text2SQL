@@ -3,25 +3,17 @@ import networkx as nx
 from typing import List, Dict, Any, Set
 from app.metadata.openmetadata_client import om_client
 
-try:
-    import chromadb
-    CHROMA_AVAILABLE = True
-except ImportError:
-    CHROMA_AVAILABLE = False
 
 
 class SmartSchemaRetriever:
     """
     Graph-RAG Schema Retriever Engine:
-    1. Vector DB (ChromaDB): Tìm kiếm ngữ nghĩa lấy các bảng hạt giống (Seed Tables).
-    2. Graph DB (NetworkX): Duyệt đồ thị Khóa ngoại (Foreign Keys) để tự động nối bảng trung gian (Junction Tables).
+    Duyệt đồ thị Khóa ngoại (Foreign Keys) qua NetworkX để tự động nối bảng trung gian (Junction Tables).
     """
 
     def __init__(self):
         self.cache_data: Dict[str, Any] = {}
         self.schema_graph = nx.Graph()
-        self.chroma_client = None
-        self.collection = None
         self.initialized = False
 
     def _initialize_engines(self):
@@ -49,60 +41,11 @@ class SmartSchemaRetriever:
                         pk_col=fk.get("target_column", "")
                     )
 
-        # 2. Khởi tạo Vector DB (ChromaDB)
-        if CHROMA_AVAILABLE:
-            try:
-                self.chroma_client = chromadb.Client()
-                # Xóa collection cũ nếu tồn tại
-                try:
-                    self.chroma_client.delete_collection("schema_vectorstore")
-                except Exception:
-                    pass
-
-                self.collection = self.chroma_client.create_collection(name="schema_vectorstore")
-
-                documents = []
-                metadatas = []
-                ids = []
-
-                for t_name, t_info in tables.items():
-                    cols_desc = []
-                    for c in t_info.get("columns", []):
-                        cols_desc.append(f"{c.get('name')} ({c.get('type')}): {c.get('description', '')}")
-                    
-                    doc_text = f"Table {t_name}: {t_info.get('description', '')}. Columns: {', '.join(cols_desc)}"
-                    documents.append(doc_text)
-                    metadatas.append({"table_name": t_name})
-                    ids.append(t_name)
-
-                if documents:
-                    self.collection.add(
-                        documents=documents,
-                        metadatas=metadatas,
-                        ids=ids
-                    )
-                print("[GRAPH-RAG] Initialized Vector DB (ChromaDB) & Graph DB (NetworkX).")
-            except Exception as e:
-                print(f"[GRAPH-RAG WARN] Failed to initialize ChromaDB ({e}) -> Fallback to Keyword/Graph Search.")
-
+        print("[GRAPH-RAG] Initialized Graph DB (NetworkX).")
         self.initialized = True
 
-    def _get_seed_tables_vector(self, question: str, top_k: int = 2) -> List[str]:
-        """Bước 1: Dùng Vector DB (ChromaDB) để tìm các bảng hạt giống (Seed Tables) theo Cosine Similarity"""
-        if self.collection:
-            try:
-                results = self.collection.query(
-                    query_texts=[question],
-                    n_results=top_k
-                )
-                if results and "metadatas" in results and results["metadatas"]:
-                    seeds = [m["table_name"] for m in results["metadatas"][0]]
-                    if seeds:
-                        return seeds
-            except Exception as e:
-                print(f"[GRAPH-RAG WARN] Vector query error: {e}")
-
-        # Fallback keyword matching nếu Vector DB chưa sẵn sàng
+    def _get_seed_tables_keyword(self, question: str, top_k: int = 2) -> List[str]:
+        """Dùng Keyword Matching cơ bản nếu không dùng LLM chọn Seed Tables."""
         tables = self.cache_data.get("tables", {})
         q_words = set(question.lower().split())
         scored = []
@@ -139,12 +82,12 @@ class SmartSchemaRetriever:
         return result_list
 
     def get_relevant_tables(self, question: str, top_k: int = 2) -> List[Dict[str, Any]]:
-        """Lọc ra danh sách bảng liên quan nhất bằng quy trình Graph-RAG (Vector Search -> Graph Expansion)"""
+        """Lọc ra danh sách bảng liên quan nhất bằng quy trình Graph-RAG (Keyword Search -> Graph Expansion)"""
         self._initialize_engines()
         tables = self.cache_data.get("tables", {})
 
-        # 1. Vector Search lấy Seed Tables
-        seed_names = self._get_seed_tables_vector(question, top_k=top_k)
+        # 1. Keyword Search lấy Seed Tables (Legacy fallback)
+        seed_names = self._get_seed_tables_keyword(question, top_k=top_k)
 
         # 2. Graph Traversal lấy các bảng trung gian JOIN
         all_relevant_names = self._expand_tables_via_graph(seed_names)

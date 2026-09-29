@@ -3,7 +3,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt, Command
 
-from app.agent.sub_agents import schema_analyst_agent, sql_generator_agent, safety_risk_agent
+from app.agent.sub_agents import intent_router_agent, schema_analyst_agent, sql_generator_agent, safety_risk_agent
 from app.llm.client import correct_sql, contextualize_question
 from app.database.connection import get_db_connection
 from app.database.executor import execute_sql
@@ -11,6 +11,7 @@ from app.database.executor import execute_sql
 
 class AgentState(TypedDict):
     question: str
+    intent: Optional[str]
     chat_history: Optional[list]
     schema_context: str
     seed_tables: Optional[list]
@@ -18,13 +19,30 @@ class AgentState(TypedDict):
     sql: str
     risk_level: Optional[str]
     risk_reason: Optional[str]
-    requires_approval: bool
     is_blocked: bool
-    approval_status: Optional[str]  # "APPROVED", "REJECTED", "MODIFIED"
     query_result: Optional[Any]
     error_message: Optional[str]
     retry_count: int
     max_retries: int
+
+
+# Step 0: Intent Router (LLM Classification)
+def intent_router_node(state: AgentState) -> dict:
+    raw_question = state["question"]
+    intent, chat_resp = intent_router_agent.classify_intent(raw_question)
+    
+    if intent == "chat":
+        return {
+            "intent": "chat",
+            "query_result": chat_resp,
+            "error_message": None
+        }
+    return {"intent": "sql"}
+
+def route_after_intent(state: AgentState) -> str:
+    if state.get("intent") == "chat":
+        return END
+    return "contextualize_query"
 
 
 # Step 1: Sub-Agent 1 (Query Contextualizer & Rewriter)
@@ -71,61 +89,17 @@ def evaluate_safety_node(state: AgentState) -> dict:
     risk_info = safety_risk_agent.evaluate_risk(question, sql)
     return {
         "risk_level": risk_info["risk_level"],
-        "requires_approval": risk_info["requires_approval"],
         "is_blocked": risk_info.get("is_blocked", False),
         "risk_reason": risk_info["risk_reason"]
     }
 
 
-# Human-in-the-Loop Approval Controller
-def human_approval_node(state: AgentState) -> dict:
-    requires_appr = state.get("requires_approval", False)
-    is_blocked = state.get("is_blocked", False)
-    status = state.get("approval_status")
-
-    if is_blocked:
-        print(f"[STEP 5: SAFETY] BLOCKED: {state.get('risk_reason')}")
-        return {"approval_status": "BLOCKED"}
-
-    if requires_appr and not status:
-        print("\n[HITL] Interrupting flow for admin approval...")
-        user_response = interrupt({
-            "type": "HUMAN_APPROVAL_REQUIRED",
-            "question": state["question"],
-            "sql": state["sql"],
-            "risk_level": state.get("risk_level"),
-            "risk_reason": state.get("risk_reason"),
-            "message": "⚠️ CẢNH BÁO RỦI RO DỮ LIỆU! Bạn có đồng ý cho phép thực thi câu lệnh SQL này không? (y/n)"
-        })
-
-        res_str = str(user_response).strip().lower()
-        if res_str in ["y", "yes", "approve", "1", "true"]:
-            approved_status = "APPROVED"
-            print("[HITL] Decision -> APPROVED")
-        else:
-            approved_status = "REJECTED"
-            print("[HITL] Decision -> REJECTED")
-
-        return {"approval_status": approved_status}
-
-    return {}
-
-
-# Step 6: Thực thi SQL trên PostgreSQL
+# Step 5: Thực thi SQL trên PostgreSQL
 def execute_sql_node(state: AgentState) -> dict:
     is_blocked = state.get("is_blocked", False)
-    requires_appr = state.get("requires_approval", False)
-    approval_status = state.get("approval_status")
 
-    if is_blocked or approval_status == "BLOCKED":
-        msg = f"[STEP 6: EXECUTE] Aborted: {state.get('risk_reason', 'Strict Read-Only policy enforced.')}"
-        return {
-            "query_result": None,
-            "error_message": msg
-        }
-
-    if requires_appr and approval_status == "REJECTED":
-        msg = "[STEP 6: EXECUTE] Aborted: Rejected by HITL administrator."
+    if is_blocked:
+        msg = f"[STEP 5: EXECUTE] Aborted: {state.get('risk_reason', 'Strict Read-Only policy enforced.')}"
         return {
             "query_result": None,
             "error_message": msg
@@ -169,12 +143,10 @@ def should_continue_after_execution(state: AgentState) -> str:
     error_msg = state.get("error_message")
     retry_count = state.get("retry_count", 0)
     max_retries = state.get("max_retries", 3)
-    requires_appr = state.get("requires_approval", False)
     is_blocked = state.get("is_blocked", False)
-    approval_status = state.get("approval_status")
 
-    # Nếu bị chính sách STRICT READ-ONLY chặn hoặc bị REJECT thì dừng luôn
-    if is_blocked or approval_status in ["BLOCKED", "REJECTED"]:
+    # Nếu bị chính sách STRICT READ-ONLY chặn thì dừng luôn
+    if is_blocked:
         return END
 
     if error_msg and error_msg.strip():
@@ -192,23 +164,32 @@ def create_text2sql_graph(checkpointer: Optional[Any] = None):
     workflow = StateGraph(AgentState)
 
     # Thêm các Nút (Nodes)
+    workflow.add_node("intent_router", intent_router_node)
     workflow.add_node("contextualize_query", contextualize_query_node)
     workflow.add_node("select_entity_tables", select_entity_tables_node)
     workflow.add_node("expand_graph_schema", expand_graph_schema_node)
     workflow.add_node("generate_sql", generate_sql_node)
     workflow.add_node("evaluate_safety", evaluate_safety_node)
-    workflow.add_node("human_approval", human_approval_node)
     workflow.add_node("execute_sql", execute_sql_node)
     workflow.add_node("correct_sql", correct_sql_node)
 
     # Thiết lập Luồng thực thi (Edges)
-    workflow.set_entry_point("contextualize_query")
+    workflow.set_entry_point("intent_router")
+    
+    workflow.add_conditional_edges(
+        "intent_router",
+        route_after_intent,
+        {
+            "contextualize_query": "contextualize_query",
+            END: END
+        }
+    )
+
     workflow.add_edge("contextualize_query", "select_entity_tables")
     workflow.add_edge("select_entity_tables", "expand_graph_schema")
     workflow.add_edge("expand_graph_schema", "generate_sql")
     workflow.add_edge("generate_sql", "evaluate_safety")
-    workflow.add_edge("evaluate_safety", "human_approval")
-    workflow.add_edge("human_approval", "execute_sql")
+    workflow.add_edge("evaluate_safety", "execute_sql")
 
 
     # Thêm rẽ nhánh điều kiện sau Nút execute_sql

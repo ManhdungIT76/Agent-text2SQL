@@ -247,8 +247,12 @@ for idx, msg in enumerate(st.session_state.messages):
         st.markdown(msg['question']) 
 
     with st.chat_message("assistant"):
+        if msg.get("intent") == "chat":
+            st.markdown(f"**💬 Phản hồi từ Trợ lý:**\n\n{msg.get('query_result', '')}")
+            continue
+
         st.markdown(f"### 📌 1. Các Bảng Thực Thể Được Chọn (Prompt 1 Output)")
-        for t in msg["selected_tables"]:
+        for t in msg.get("selected_tables", []):
             st.markdown(f'<span class="badge-sel">📄 {t}</span>', unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -299,6 +303,7 @@ if user_question:
 
         initial_state = {
             "question": user_question,
+            "intent": None,
             "chat_history": clean_history,
             "schema_context": "",
             "sql": "",
@@ -333,6 +338,8 @@ if user_question:
     # THÊM VÀO LỊCH SỬ CHAT SESSION STATE VÀ RERUN ĐỂ HIỂN THỊ
     st.session_state.messages.append({
         "question": user_question,
+        "intent": final_state.get("intent", "sql"),
+        "query_result": query_result,
         "selected_tables": seed_tables,
         "bridge_tables": bridge_tables,
         "fk_links": [],
