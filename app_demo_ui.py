@@ -11,9 +11,11 @@ from app.agent.graph import text2sql_agent_graph, get_langfuse_handler
 from app.metadata.openmetadata_client import om_client
 from app.langfuse_utils import create_trace_handler, flush_all, check_langfuse_connection
 from app.llm.prompts import (
+    INTENT_ROUTER_PROMPT_TEMPLATE,
     TABLE_SELECTION_PROMPT_TEMPLATE, 
     build_system_prompt_v2, 
     get_display_prompt_text,
+    get_display_prompt_details,
     CORRECTION_PROMPT_TEMPLATE,
     CONTEXTUALIZE_PROMPT_TEMPLATE
 )
@@ -69,6 +71,10 @@ st.markdown("""
         font-weight: 600;
         margin-right: 8px;
         display: inline-block;
+    }
+    div[data-testid="stCodeBlock"] pre {
+        white-space: pre-wrap !important;
+        word-break: break-word !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -211,26 +217,32 @@ with st.sidebar:
         st.rerun()
 
     if st.button("🗑️ Xóa Lịch Sử Chat", width="stretch"):
+        import uuid
         st.session_state.messages = []
+        st.session_state.session_id = f"demo_session_{uuid.uuid4().hex[:8]}"
         st.rerun()
 
     st.markdown("---")
     
-    prompt_1_display = get_display_prompt_text("text2sql-table-selector", TABLE_SELECTION_PROMPT_TEMPLATE)
-    prompt_2_display = get_display_prompt_text("text2sql-generator", build_system_prompt_v2("{schema_context}"))
-    prompt_3_display = get_display_prompt_text("text2sql-self-corrector", CORRECTION_PROMPT_TEMPLATE)
-    prompt_4_display = get_display_prompt_text("text2sql-contextualizer", CONTEXTUALIZE_PROMPT_TEMPLATE)
+    prompt_0_display, p0_badge = get_display_prompt_details("text2sql-intent-router", INTENT_ROUTER_PROMPT_TEMPLATE)
+    prompt_1_display, p1_badge = get_display_prompt_details("text2sql-table-selector", TABLE_SELECTION_PROMPT_TEMPLATE)
+    prompt_2_display, p2_badge = get_display_prompt_details("text2sql-generator", build_system_prompt_v2("{schema_context}"))
+    prompt_3_display, p3_badge = get_display_prompt_details("text2sql-self-corrector", CORRECTION_PROMPT_TEMPLATE)
+    prompt_4_display, p4_badge = get_display_prompt_details("text2sql-contextualizer", CONTEXTUALIZE_PROMPT_TEMPLATE)
 
-    with st.expander("📝 PROMPT 1 (text2sql-table-selector)"):
+    with st.expander(f"🧭 PROMPT 0: Intent Router ({p0_badge})"):
+        st.code(prompt_0_display, language="markdown")
+
+    with st.expander(f"📝 PROMPT 1: Table Selector ({p1_badge})"):
         st.code(prompt_1_display, language="markdown")
         
-    with st.expander("💻 PROMPT 2 (text2sql-generator)"):
+    with st.expander(f"💻 PROMPT 2: SQL Generator ({p2_badge})"):
         st.code(prompt_2_display, language="markdown")
 
-    with st.expander("🔧 PROMPT 3 (text2sql-self-corrector)"):
+    with st.expander(f"🔧 PROMPT 3: Self-Corrector ({p3_badge})"):
         st.code(prompt_3_display, language="markdown")
 
-    with st.expander("🔄 PROMPT 4 (text2sql-contextualizer)"):
+    with st.expander(f"🔄 PROMPT 4: Contextualizer ({p4_badge})"):
         st.code(prompt_4_display, language="markdown")
 
 
@@ -238,6 +250,9 @@ with st.sidebar:
 # QUẢN LÝ LỊCH SỬ CHAT TRONG SESSION STATE
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "session_id" not in st.session_state:
+    import uuid
+    st.session_state.session_id = f"demo_session_{uuid.uuid4().hex[:8]}"
 
 # =====================================================================
 # HIỂN THỊ CÁC CÂU HỎI & KẾT QUẢ XỬ LÝ TRƯỚC ĐÓ Ở PHÍA TRÊN
@@ -272,16 +287,24 @@ for idx, msg in enumerate(st.session_state.messages):
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        st.markdown("### 💻 3. Câu Lệnh SQL PostgreSQL Sinh Ra (Prompt 2 Output)")
-        st.code(msg["sql_code"], language="sql")
+        sql_code = msg.get("sql_code", "")
+        if "CANNOT_ANSWER" in sql_code.upper():
+            st.markdown("### ⚠️ 3. Phản Hồi Từ Chối Truy Vấn (Anti-Hallucination Guard)")
+            refusal_reason = sql_code.replace("CANNOT_ANSWER:", "").strip()
+            st.warning(f"🚫 **Hệ thống từ chối sinh SQL:** {refusal_reason}")
+        else:
+            st.markdown("### 💻 3. Câu Lệnh SQL PostgreSQL Sinh Ra (Prompt 2 Output)")
+            st.code(sql_code, language="sql")
 
         st.markdown("### 📊 Kết Quả Truy Vấn CSDL PostgreSQL")
-        if msg.get("df") is not None and not msg["df"].empty:
+        if "CANNOT_ANSWER" in sql_code.upper() or msg.get("is_blocked"):
+            st.info("ℹ️ Không thực thi truy vấn do thông tin yêu cầu không tồn tại trong CSDL hoặc bị từ chối.")
+        elif msg.get("df") is not None and not msg["df"].empty:
             st.dataframe(msg["df"], width="stretch")
         elif msg.get("error_msg"):
             st.caption(msg["error_msg"])
         else:
-            st.caption("ℹ️ Không có bản ghi nào được trả về.")
+            st.warning("⚠️ Không có kết quả phù hợp. Vui lòng kiểm tra lại thông tin tìm kiếm.")
 
 # =====================================================================
 # Ô CHAT NHẬP CÂU HỎI Ở PHÍA DƯỚI (ST.CHAT_INPUT)
@@ -291,31 +314,27 @@ user_question = st.chat_input("💬 Nhập câu hỏi tra cứu dữ liệu (ví
 if user_question:
     query_count = len(st.session_state.messages) + 1
 
-    with st.spinner("⚡ [LangGraph State Machine Agent]: Đang thực thi qua 6 Nút (Graph-RAG -> Generator -> Safety Assessor -> PostgreSQL -> Self-Correction)..."):
-        # Lọc sạch lịch sử chat: chỉ lấy question và sql_code (loại bỏ đối tượng DataFrame gây lỗi msgpack)
-        clean_history = [
-            {
-                "role": "user", "question": m.get("question", ""),
-                "role_assistant": "assistant", "sql": m.get("sql_code", "")
-            }
-            for m in st.session_state.messages
-        ]
-
+    with st.spinner("Đang tiến hành xử lý..."):
         initial_state = {
             "question": user_question,
             "intent": None,
-            "chat_history": clean_history,
             "schema_context": "",
+            "seed_tables": [],
+            "retrieved_tables": [],
             "sql": "",
+            "risk_level": None,
+            "risk_reason": None,
+            "is_blocked": False,
             "query_result": None,
             "error_message": None,
-            "retry_count": 0,
-            "max_retries": 3
+            "retry_count": 0
         }
 
-        run_config = {"configurable": {"thread_id": f"demo_ui_{query_count}"}}
+        # Dùng chung session_id cố định cho cả LangGraph Checkpointer và Langfuse Tracing
+        current_session_id = st.session_state.session_id
+        run_config = {"configurable": {"thread_id": current_session_id}}
         lf_handler = get_langfuse_handler(
-            session_id=f"demo_ui_session_{query_count}",
+            session_id=current_session_id,
             trace_name=f"demo-ui-query-{query_count}"
         )
         if lf_handler:
@@ -330,10 +349,16 @@ if user_question:
     bridge_tables = [t for t in retrieved_tables if t not in seed_tables]
     schema_context = final_state.get("schema_context", "")
     sql_code = final_state.get("sql", "")
+    is_blocked = final_state.get("is_blocked", False)
     query_result = final_state.get("query_result")
     err_text = final_state.get("error_message")
 
-    result_df = pd.DataFrame(query_result) if query_result and isinstance(query_result, list) and len(query_result) > 0 else None
+    # Nếu bị từ chối do ngoài schema hoặc bị chặn bảo mật, tuyệt đối không lấy lại DataFrame cũ
+    if "CANNOT_ANSWER" in sql_code.upper() or is_blocked:
+        result_df = None
+        query_result = None
+    else:
+        result_df = pd.DataFrame(query_result) if query_result and isinstance(query_result, list) and len(query_result) > 0 else None
 
     # THÊM VÀO LỊCH SỬ CHAT SESSION STATE VÀ RERUN ĐỂ HIỂN THỊ
     st.session_state.messages.append({
@@ -345,6 +370,7 @@ if user_question:
         "fk_links": [],
         "schema_context": schema_context,
         "sql_code": sql_code,
+        "is_blocked": is_blocked,
         "df": result_df,
         "error_msg": err_text
     })

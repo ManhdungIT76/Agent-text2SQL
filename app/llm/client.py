@@ -13,6 +13,13 @@ def clean_sql(raw_output) -> str:
     if "<think>" in sql:
         sql = re.sub(r'<think>.*?</think>', '', sql, flags=re.DOTALL).strip()
         
+    # 1.2 Nếu phát hiện thông báo từ chối do ngoài Schema (Anti-Hallucination) -> Giữ nguyên phản hồi
+    if "CANNOT_ANSWER" in sql.upper():
+        cannot_match = re.search(r'(CANNOT_ANSWER:?.*)', sql, re.IGNORECASE)
+        if cannot_match:
+            return cannot_match.group(1).strip()
+        return sql
+
     # 1.5 Trích xuất SQL nếu LLM trả về trong thẻ <sql>...</sql>
     xml_sql_match = re.search(r'<sql>\s*(.*?)\s*</sql>', sql, re.DOTALL | re.IGNORECASE)
     if xml_sql_match:
@@ -125,7 +132,7 @@ def select_tables(question: str, schema_overview: str) -> list:
     if not parsed_tables:
         parsed_tables = re.findall(r'\b([a-zA-Z0-9_]+)\b', schema_overview)
     
-    q_words = set(question.lower().split())
+    q_words = set(question.lower().split()) 
     matched = []
     for tbl in parsed_tables:
         tbl_lower = tbl.lower()
@@ -148,7 +155,7 @@ def get_llm_model():
                 huggingfacehub_api_token=config.HUGGINGFACEHUB_API_TOKEN,
                 task="conversational",
                 temperature=0.01,
-                max_new_tokens=512
+                max_new_tokens=1536
             )
             return ChatHuggingFace(llm=endpoint)
         except Exception as e:
@@ -160,7 +167,7 @@ def get_llm_model():
             model=config.GROQ_MODEL,
             api_key=config.GROQ_API_KEY,
             temperature=0,
-            max_tokens=512
+            max_tokens=1536
         )
     elif config.GOOGLE_API_KEY:
         from langchain_google_genai import ChatGoogleGenerativeAI
@@ -183,7 +190,7 @@ def get_fallback_llm():
                 model=config.GROQ_MODEL,
                 api_key=config.GROQ_API_KEY,
                 temperature=0,
-                max_tokens=512
+                max_tokens=1536
             )
         except Exception:
             pass
@@ -332,3 +339,39 @@ def contextualize_question(question: str, chat_history: list = None) -> str:
         print(f"[STEP 1: QUERY REWRITER WARN] {e} -> Keeping original question.")
 
     return question
+
+
+def classify_intent(question: str) -> tuple[str, str]:
+    """PROMPT 0 (Giai đoạn 0): Phân luồng ý định (Intent Router) gửi câu hỏi vào LLM để phân loại 'sql' hoặc 'chat'"""
+    from app.llm.prompts import get_intent_router_prompt
+    prompt = get_intent_router_prompt(question=question)
+    cfg, lf_handler = _get_langfuse_config()
+
+    try:
+        llm = get_llm_model() or get_fallback_llm()
+        if llm:
+            chain = prompt | llm
+            response = chain.invoke({"question": question}, config=cfg)
+            _flush_langfuse(lf_handler)
+            result = getattr(response, "content", str(response)).strip()
+            if result.upper().startswith("CHAT|||"):
+                chat_resp = result.split("CHAT|||")[-1].strip()
+                return "chat", chat_resp
+            return "sql", ""
+    except Exception as e:
+        print(f"[LLM WARN] Intent classification error ({e}) -> Trying fallback model...")
+        try:
+            fallback_llm = get_fallback_llm()
+            if fallback_llm:
+                chain = prompt | fallback_llm
+                response = chain.invoke({"question": question}, config=cfg)
+                _flush_langfuse(lf_handler)
+                result = getattr(response, "content", str(response)).strip()
+                if result.upper().startswith("CHAT|||"):
+                    chat_resp = result.split("CHAT|||")[-1].strip()
+                    return "chat", chat_resp
+                return "sql", ""
+        except Exception as fe:
+            print(f"[LLM ERROR] Failover model failed in intent router: {fe}")
+
+    return "sql", ""

@@ -58,6 +58,7 @@ html,body,[class*="css"]{font-family:'Inter',sans-serif;}
 .sec-title{background:linear-gradient(90deg,#38bdf8,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:1rem;font-weight:700;}
 
 .chat-hdr{background:linear-gradient(135deg,#1e293b,#0f172a);border:1px solid #334155;border-top:3px solid #818cf8;border-radius:12px;padding:14px 20px;margin:26px 0 12px 0;}
+div[data-testid="stCodeBlock"] pre { white-space: pre-wrap !important; word-break: break-word !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -68,9 +69,19 @@ from app.database.executor import execute_sql
 from app.agent.graph import text2sql_agent_graph, get_langfuse_handler
 from app.metadata.openmetadata_client import om_client
 from app.langfuse_utils import flush_all, check_langfuse_connection
+from app.llm.prompts import (
+    INTENT_ROUTER_PROMPT_TEMPLATE,
+    TABLE_SELECTION_PROMPT_TEMPLATE, 
+    build_system_prompt_v2, 
+    get_display_prompt_text,
+    get_display_prompt_details,
+    CORRECTION_PROMPT_TEMPLATE,
+    CONTEXTUALIZE_PROMPT_TEMPLATE
+)
 
+import uuid
 # ── SESSION STATE ─────────────────────────────────────────────────────────────
-for k, v in [("mgr_msgs", []), ("mgr_qcount", 0), ("mgr_lat", None), ("mgr_period", "🏢 Theo Năm (12 Tháng)"), ("mgr_month", 4)]:
+for k, v in [("mgr_msgs", []), ("mgr_qcount", 0), ("mgr_lat", None), ("mgr_period", "🏢 Theo Năm (12 Tháng)"), ("mgr_month", 4), ("mgr_session_id", f"mgr_session_{uuid.uuid4().hex[:8]}")]:
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -263,6 +274,29 @@ with st.sidebar:
         st.rerun()
     if st.session_state.mgr_lat: st.caption(f"⏱️ Thời gian phản hồi: {st.session_state.mgr_lat:.0f}ms")
     st.caption(f"💬 Số câu hỏi đã truy vấn: {st.session_state.mgr_qcount}")
+
+    st.markdown("---")
+    st.markdown("**📜 Quản lý Prompts (Langfuse Cloud)**")
+    prompt_0_display, p0_badge = get_display_prompt_details("text2sql-intent-router", INTENT_ROUTER_PROMPT_TEMPLATE)
+    prompt_1_display, p1_badge = get_display_prompt_details("text2sql-table-selector", TABLE_SELECTION_PROMPT_TEMPLATE)
+    prompt_2_display, p2_badge = get_display_prompt_details("text2sql-generator", build_system_prompt_v2("{schema_context}"))
+    prompt_3_display, p3_badge = get_display_prompt_details("text2sql-self-corrector", CORRECTION_PROMPT_TEMPLATE)
+    prompt_4_display, p4_badge = get_display_prompt_details("text2sql-contextualizer", CONTEXTUALIZE_PROMPT_TEMPLATE)
+
+    with st.expander(f"🧭 PROMPT 0: Intent Router ({p0_badge})"):
+        st.code(prompt_0_display, language="markdown")
+
+    with st.expander(f"📝 PROMPT 1: Table Selector ({p1_badge})"):
+        st.code(prompt_1_display, language="markdown")
+        
+    with st.expander(f"💻 PROMPT 2: SQL Generator ({p2_badge})"):
+        st.code(prompt_2_display, language="markdown")
+
+    with st.expander(f"🔧 PROMPT 3: Self-Corrector ({p3_badge})"):
+        st.code(prompt_3_display, language="markdown")
+
+    with st.expander(f"🔄 PROMPT 4: Contextualizer ({p4_badge})"):
+        st.code(prompt_4_display, language="markdown")
 
 # ── PAGE HEADER ───────────────────────────────────────────────────────────────
 st.markdown(f"""
@@ -485,7 +519,9 @@ def render_demo_ui_sections(msg: dict):
 
     # Section 4: PostgreSQL Query Execution Results
     st.markdown("### 📊 4. Kết Quả Truy Vấn CSDL PostgreSQL")
-    if df_res is not None and not df_res.empty:
+    if "CANNOT_ANSWER" in sql_o.upper() or msg.get("is_blocked"):
+        st.info("ℹ️ Không thực thi truy vấn do câu hỏi không thuộc phạm vi CSDL hoặc bị từ chối.")
+    elif df_res is not None and not df_res.empty:
         st.dataframe(df_res, use_container_width=True)
         st.download_button("📥 Xuất báo cáo CSV",
             data=df_res.to_csv(index=False).encode("utf-8"),
@@ -494,7 +530,7 @@ def render_demo_ui_sections(msg: dict):
         if lat:
             st.caption(f"⏱️ {lat:.0f}ms | 📊 {len(df_res)} bản ghi")
     else:
-        st.caption("ℹ️ Không có bản ghi nào được trả về.")
+        st.warning("⚠️ Không có kết quả phù hợp. Vui lòng kiểm tra lại thông tin tìm kiếm.")
 
 
 for msg in st.session_state.mgr_msgs:
@@ -526,14 +562,25 @@ if question:
             st.write("5️⃣ **GIAI ĐOẠN 5**: Kiểm tra bảo mật Read-Only & Tự động sửa lỗi cú pháp (Self-Correction)...")
 
             init_s = {
-                "question": question, "intent": None, "chat_history": [],
-                "schema_context": "", "sql": "",
-                "risk_level": None, "risk_reason": None,
-                "requires_approval": False, "is_blocked": False, "approval_status": None,
-                "query_result": None, "error_message": None, "retry_count": 0, "max_retries": 3,
+                "question": question,
+                "intent": None,
+                "schema_context": "",
+                "seed_tables": [],
+                "retrieved_tables": [],
+                "sql": "",
+                "risk_level": None,
+                "risk_reason": None,
+                "is_blocked": False,
+                "query_result": None,
+                "error_message": None,
+                "retry_count": 0
             }
-            run_cfg = {"configurable": {"thread_id": f"mgr_{st.session_state.mgr_qcount}"}}
-            lf = get_langfuse_handler()
+            current_mgr_session = st.session_state.mgr_session_id
+            run_cfg = {"configurable": {"thread_id": current_mgr_session}}
+            lf = get_langfuse_handler(
+                session_id=current_mgr_session,
+                trace_name=f"manager-query-{st.session_state.mgr_qcount}"
+            )
             if lf: run_cfg["callbacks"] = [lf]
 
             t0 = time.perf_counter()
@@ -558,12 +605,19 @@ if question:
         sch_ctx   = fs.get("schema_context", "")
         retry_cnt = fs.get("retry_count", 0)
         ts_now    = time.strftime("%Y%m%d_%H%M%S")
-        df_res    = pd.DataFrame(res) if res and isinstance(res, list) and len(res) > 0 else None
+
+        # Nếu bị từ chối do ngoài schema hoặc bị chặn bảo mật, tuyệt đối không lấy lại DataFrame cũ
+        if "CANNOT_ANSWER" in sql_o.upper() or blk:
+            df_res = None
+            res = None
+        else:
+            df_res = pd.DataFrame(res) if res and isinstance(res, list) and len(res) > 0 else None
 
         msg_data = {
             "role": "assistant",
             "intent": fs.get("intent", "sql"),
-            "query_result": fs.get("query_result"),
+            "query_result": res,
+            "is_blocked": blk,
             "seed_tables": seed_tbls,
             "retrieved_tables": ret_tbls,
             "bridge_tables": [t for t in ret_tbls if t not in seed_tbls],

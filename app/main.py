@@ -15,8 +15,14 @@ def run_query(question: str):
     # Kích hoạt LangGraph Workflow (Graph-RAG -> Prompt v2.0 -> Postgres Execution -> Self-Correction)
     initial_state = {
         "question": question,
+        "intent": None,
         "schema_context": "",
+        "seed_tables": [],
+        "retrieved_tables": [],
         "sql": "",
+        "risk_level": None,
+        "risk_reason": None,
+        "is_blocked": False,
         "query_result": None,
         "error_message": None,
         "retry_count": 0,

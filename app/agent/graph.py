@@ -82,22 +82,55 @@ def generate_sql_node(state: AgentState) -> dict:
     return {"sql": sql, "error_message": None}
 
 
-# Step 5: Sub-Agent 5 (Safety & Risk Assessment)
+# Step 5: Sub-Agent 5 (Safety & Risk Assessment qua SQL Parser)
 def evaluate_safety_node(state: AgentState) -> dict:
     question = state["question"]
     sql = state["sql"]
     risk_info = safety_risk_agent.evaluate_risk(question, sql)
+    is_blocked = risk_info.get("is_blocked", False)
     return {
+        "sql": risk_info.get("normalized_sql", sql),
         "risk_level": risk_info["risk_level"],
-        "is_blocked": risk_info.get("is_blocked", False),
-        "risk_reason": risk_info["risk_reason"]
+        "is_blocked": is_blocked,
+        "risk_reason": risk_info["risk_reason"],
+        "error_message": risk_info.get("error_message"),
+        "query_result": None if is_blocked else state.get("query_result")
     }
 
 
-# Step 5: Thực thi SQL trên PostgreSQL
-def execute_sql_node(state: AgentState) -> dict:
-    is_blocked = state.get("is_blocked", False)
+def route_after_safety(state: AgentState) -> str:
+    """Hàm rẽ nhánh sau bước evaluate_safety"""
+    # Nhánh 1: Bị chặn do lệnh cấm DML/DDL -> DỪNG NGAY
+    if state.get("is_blocked"):
+        return END
 
+    # Nhánh 2: Parser bắt lỗi cú pháp gãy -> RẼ THẲNG VÀO SELF-CORRECTION
+    if state.get("error_message"):
+        retry_count = state.get("retry_count", 0)
+        max_retries = state.get("max_retries", 3)
+        if retry_count < max_retries:
+            return "correct_sql"
+        return END
+
+    # Nhánh 3: An toàn và hợp lệ -> ĐI TIẾP VÀO THỰC THI CSDL
+    return "execute_sql"
+
+
+# Step 6: Thực thi SQL trên PostgreSQL
+def execute_sql_node(state: AgentState) -> dict:
+    sql = state.get("sql", "")
+
+    # 1. Kiểm tra nếu LLM từ chối do ngoài Schema (Anti-Hallucination Guard)
+    if "CANNOT_ANSWER" in sql.upper():
+        reason = sql.replace("CANNOT_ANSWER:", "").strip()
+        print(f"[STEP 6: EXECUTE] Query aborted by Anti-Hallucination Guard: {reason}")
+        return {
+            "query_result": None,
+            "error_message": reason,
+            "is_blocked": True
+        }
+
+    is_blocked = state.get("is_blocked", False)
     if is_blocked:
         msg = f"[STEP 5: EXECUTE] Aborted: {state.get('risk_reason', 'Strict Read-Only policy enforced.')}"
         return {
@@ -189,7 +222,15 @@ def create_text2sql_graph(checkpointer: Optional[Any] = None):
     workflow.add_edge("select_entity_tables", "expand_graph_schema")
     workflow.add_edge("expand_graph_schema", "generate_sql")
     workflow.add_edge("generate_sql", "evaluate_safety")
-    workflow.add_edge("evaluate_safety", "execute_sql")
+    workflow.add_conditional_edges(
+        "evaluate_safety",
+        route_after_safety,
+        {
+            "execute_sql": "execute_sql",
+            "correct_sql": "correct_sql",
+            END: END
+        }
+    )
 
 
     # Thêm rẽ nhánh điều kiện sau Nút execute_sql
@@ -201,7 +242,7 @@ def create_text2sql_graph(checkpointer: Optional[Any] = None):
             END: END
         }
     )
-    workflow.add_edge("correct_sql", "execute_sql")
+    workflow.add_edge("correct_sql", "evaluate_safety")
 
     # Sử dụng Checkpointer mặc định MemorySaver nếu không truyền
     cp = checkpointer or MemorySaver()
